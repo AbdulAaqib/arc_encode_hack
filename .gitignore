@@ -21,3 +21,8 @@ blockchain_code/lib
 blockchain_code/streamlit/.DS_Store
 .DS_Store
 streamlit/src/frontend/components/__pycache__
+
+
+
+streamlit/src/frontend/components/wallet_connect_component/frontend/node_modules
+streamlit/src/frontend/components/wallet_connect_component/frontend/*.tsbuildinfo

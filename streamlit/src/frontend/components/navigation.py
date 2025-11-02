@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 
-PAGES: tuple[str, ...] = ("Intro", "Chatbot", "MCP Tools")
+PAGES: tuple[str, ...] = ("Intro", "Chatbot", "Wallet", "MCP Tools")
 
 
 def render_navigation() -> str:

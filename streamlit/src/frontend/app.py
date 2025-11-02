@@ -11,6 +11,7 @@ from components.chatbot import render_chatbot_page
 from components.intro import render_intro_page
 from components.mcp_tools import render_mcp_tools_page
 from components.navigation import render_navigation
+from components.wallet import render_wallet_page
 
 dotenv_spec = importlib.util.find_spec("dotenv")
 if dotenv_spec is not None:  # pragma: no cover - imported at runtime when available
@@ -32,6 +33,8 @@ if active_page == "Intro":
     render_intro_page()
 elif active_page == "Chatbot":
     render_chatbot_page()
+elif active_page == "Wallet":
+    render_wallet_page()
 else:
     render_mcp_tools_page()
 
