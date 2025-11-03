@@ -554,3 +554,542 @@ def build_llm_toolkit(
     )
 
     return tools, handlers
+
+# ===== LendingPool MCP toolkit =====
+
+def build_lending_pool_toolkit(
+    *,
+    w3: Web3,
+    pool_contract: Contract,
+    usdc_address: Optional[str],
+    usdc_abi: Optional[list[dict[str, Any]]],
+    usdc_decimals: int,
+    private_key: Optional[str],
+    default_gas_limit: int,
+    gas_price_gwei: str,
+) -> Tuple[list[Dict[str, Any]], Dict[str, Callable[..., str]]]:
+    tools: list[Dict[str, Any]] = []
+    handlers: Dict[str, Callable[..., str]] = {}
+
+    def register(name: str, description: str, parameters: Dict[str, Any], handler: Callable[..., str]) -> None:
+        tools.append({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
+        handlers[name] = handler
+
+    # Minimal ERC20 ABI if none provided
+    erc20_abi = usdc_abi or [
+        {
+            "name": "approve",
+            "type": "function",
+            "stateMutability": "nonpayable",
+            "inputs": [
+                {"name": "spender", "type": "address"},
+                {"name": "amount", "type": "uint256"},
+            ],
+            "outputs": [{"name": "", "type": "bool"}],
+        },
+        {
+            "name": "balanceOf",
+            "type": "function",
+            "stateMutability": "view",
+            "inputs": [{"name": "account", "type": "address"}],
+            "outputs": [{"name": "", "type": "uint256"}],
+        },
+    ]
+
+    usdc_contract: Optional[Contract] = None
+    if usdc_address:
+        try:
+            usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=erc20_abi)
+        except Exception:
+            usdc_contract = None
+
+    # Helpers
+    def _check_pk() -> Optional[str]:
+        if not private_key:
+            return "PRIVATE_KEY not configured. Configure it in .env to submit transactions."
+        return None
+
+    def _acct() -> Optional[str]:
+        try:
+            return w3.eth.account.from_key(private_key).address  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    def _fees() -> Dict[str, int]:
+        return _fee_params(w3, gas_price_gwei)
+
+    def _to_token_units(amount: float | int) -> int:
+        try:
+            amt = Decimal(str(amount))
+            scale = Decimal(10) ** int(usdc_decimals)
+            return int(amt * scale)
+        except Exception:
+            return int(amount)
+
+    # ---- Views ----
+    def availableLiquidity_tool() -> str:
+        try:
+            amount = int(getattr(pool_contract.functions, "availableLiquidity")().call())
+            return tool_success({"availableLiquidity": amount})
+        except Exception as exc:
+            return tool_error(f"Read failed: {exc}")
+
+    register(
+        "availableLiquidity",
+        "Read pool's available liquidity (token balance).",
+        {"type": "object", "properties": {}, "required": []},
+        lambda: availableLiquidity_tool(),
+    )
+
+    def lenderBalance_tool(lender_address: str) -> str:
+        try:
+            lender = Web3.to_checksum_address(lender_address)
+            amount = int(getattr(pool_contract.functions, "lenderBalance")(lender).call())
+            return tool_success({"lender": lender, "balance": amount})
+        except Exception as exc:
+            return tool_error(f"Read failed: {exc}")
+
+    register(
+        "lenderBalance",
+        "Read net balance (deposits - withdrawals) for a lender.",
+        {
+            "type": "object",
+            "properties": {"lender_address": {"type": "string", "description": "Lender wallet address."}},
+            "required": ["lender_address"],
+        },
+        lenderBalance_tool,
+    )
+
+    def getLoan_tool(borrower_address: str) -> str:
+        try:
+            borrower = Web3.to_checksum_address(borrower_address)
+            loan = getattr(pool_contract.functions, "getLoan")(borrower).call()
+            principal, outstanding, startTime, dueTime, active = loan
+            return tool_success(
+                {
+                    "borrower": borrower,
+                    "principal": int(principal),
+                    "outstanding": int(outstanding),
+                    "startTime": int(startTime),
+                    "dueTime": int(dueTime),
+                    "active": bool(active),
+                }
+            )
+        except Exception as exc:
+            return tool_error(f"Read failed: {exc}")
+
+    register(
+        "getLoan",
+        "Read loan struct for a borrower (principal, outstanding, startTime, dueTime, active).",
+        {
+            "type": "object",
+            "properties": {"borrower_address": {"type": "string", "description": "Borrower wallet address."}},
+            "required": ["borrower_address"],
+        },
+        getLoan_tool,
+    )
+
+    def isBanned_tool(borrower_address: str) -> str:
+        try:
+            borrower = Web3.to_checksum_address(borrower_address)
+            banned = bool(getattr(pool_contract.functions, "isBanned")(borrower).call())
+            return tool_success({"borrower": borrower, "banned": banned})
+        except Exception as exc:
+            return tool_error(f"Read failed: {exc}")
+
+    register(
+        "isBanned",
+        "Check if a borrower is banned due to default.",
+        {
+            "type": "object",
+            "properties": {"borrower_address": {"type": "string", "description": "Borrower wallet address."}},
+            "required": ["borrower_address"],
+        },
+        isBanned_tool,
+    )
+
+    # ---- Writes ----
+    def approveUSDC_tool(amount: float | int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        if not usdc_contract:
+            return tool_error("USDC contract not initialized; set USDC_ADDRESS and USDC_ABI_PATH (or use minimal ABI).")
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            amt = _to_token_units(amount)
+            tx = usdc_contract.functions.approve(pool_contract.address, amt).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "approve failed"))
+        except Exception as exc:
+            return tool_error(f"Approve failed: {exc}")
+
+    register(
+        "approveUSDC",
+        "Approve the LendingPool to spend your USDC for deposits/repayments.",
+        {
+            "type": "object",
+            "properties": {"amount": {"type": "number", "description": "Amount in human units (e.g., 1.5 USDC)."}},
+            "required": ["amount"],
+        },
+        approveUSDC_tool,
+    )
+
+    def deposit_tool(amount: float | int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            amt = _to_token_units(amount)
+            tx = pool_contract.functions.deposit(amt).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "deposit failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"Deposit failed: {exc}")
+
+    register(
+        "deposit",
+        "Deposit USDC into the LendingPool (requires prior approve).",
+        {
+            "type": "object",
+            "properties": {"amount": {"type": "number", "description": "Amount in human units (e.g., 100 USDC)."}},
+            "required": ["amount"],
+        },
+        deposit_tool,
+    )
+
+    def withdraw_tool(amount: float | int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            amt = _to_token_units(amount)
+            tx = pool_contract.functions.withdraw(amt).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "withdraw failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"Withdraw failed: {exc}")
+
+    register(
+        "withdraw",
+        "Withdraw available USDC from the LendingPool (subject to liquidity/locks).",
+        {
+            "type": "object",
+            "properties": {"amount": {"type": "number", "description": "Amount in human units."}},
+            "required": ["amount"],
+        },
+        withdraw_tool,
+    )
+
+    def openLoan_tool(borrower_address: str, principal: float | int, term_seconds: int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            borrower = Web3.to_checksum_address(borrower_address)
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            principal_units = _to_token_units(principal)
+            tx = pool_contract.functions.openLoan(borrower, principal_units, int(term_seconds)).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "openLoan failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"openLoan failed: {exc}")
+
+    register(
+        "openLoan",
+        "Owner-only: open a loan for borrower and transfer principal.",
+        {
+            "type": "object",
+            "properties": {
+                "borrower_address": {"type": "string", "description": "Borrower wallet address."},
+                "principal": {"type": "number", "description": "Principal in human units (e.g., 50 USDC)."},
+                "term_seconds": {"type": "integer", "description": "Loan term in seconds (e.g., 604800 for 7 days)."},
+            },
+            "required": ["borrower_address", "principal", "term_seconds"],
+        },
+        openLoan_tool,
+    )
+
+    def repay_tool(amount: float | int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            borrower_addr = _acct()
+            if not borrower_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            fees = _fees()
+            nonce = _next_nonce(w3, borrower_addr)
+            amt = _to_token_units(amount)
+            tx = pool_contract.functions.repay(amt).build_transaction(
+                {
+                    "from": borrower_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "repay failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"Repay failed: {exc}")
+
+    register(
+        "repay",
+        "Borrower: repay part/all of outstanding loan (requires USDC approve).",
+        {
+            "type": "object",
+            "properties": {"amount": {"type": "number", "description": "Repayment amount in human units."}},
+            "required": ["amount"],
+        },
+        repay_tool,
+    )
+
+    def checkDefaultAndBan_tool(borrower_address: str) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            borrower = Web3.to_checksum_address(borrower_address)
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            tx = pool_contract.functions.checkDefaultAndBan(borrower).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "checkDefaultAndBan failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"checkDefaultAndBan failed: {exc}")
+
+    register(
+        "checkDefaultAndBan",
+        "Anyone: check if borrower defaulted and ban if overdue.",
+        {
+            "type": "object",
+            "properties": {"borrower_address": {"type": "string", "description": "Borrower wallet address."}},
+            "required": ["borrower_address"],
+        },
+        checkDefaultAndBan_tool,
+    )
+
+    def setDepositLockSeconds_tool(seconds: int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            tx = pool_contract.functions.setDepositLockSeconds(int(seconds)).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "setDepositLockSeconds failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"setDepositLockSeconds failed: {exc}")
+
+    register(
+        "setDepositLockSeconds",
+        "Owner-only: set global deposit lock duration in seconds.",
+        {
+            "type": "object",
+            "properties": {"seconds": {"type": "integer", "description": "Lock duration in seconds (0 to disable)."}},
+            "required": ["seconds"],
+        },
+        setDepositLockSeconds_tool,
+    )
+
+    def setTrustMintSbt_tool(sbt_address: str) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            sbt = Web3.to_checksum_address(sbt_address)
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            tx = pool_contract.functions.setTrustMintSbt(sbt).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "setTrustMintSbt failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"setTrustMintSbt failed: {exc}")
+
+    register(
+        "setTrustMintSbt",
+        "Owner-only: set TrustMint SBT address for score gating (0x0 to disable).",
+        {
+            "type": "object",
+            "properties": {"sbt_address": {"type": "string", "description": "SBT contract address or 0x000... to disable."}},
+            "required": ["sbt_address"],
+        },
+        setTrustMintSbt_tool,
+    )
+
+    def setMinScoreToBorrow_tool(new_min_score: int) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            tx = pool_contract.functions.setMinScoreToBorrow(int(new_min_score)).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "setMinScoreToBorrow failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"setMinScoreToBorrow failed: {exc}")
+
+    register(
+        "setMinScoreToBorrow",
+        "Owner-only: set minimum score threshold for borrowing.",
+        {
+            "type": "object",
+            "properties": {"new_min_score": {"type": "integer", "description": "Minimum score required."}},
+            "required": ["new_min_score"],
+        },
+        setMinScoreToBorrow_tool,
+    )
+
+    def unban_tool(borrower_address: str) -> str:
+        msg = _check_pk()
+        if msg:
+            return tool_error(msg)
+        try:
+            owner_addr = _acct()
+            if not owner_addr:
+                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
+            borrower = Web3.to_checksum_address(borrower_address)
+            fees = _fees()
+            nonce = _next_nonce(w3, owner_addr)
+            tx = pool_contract.functions.unban(borrower).build_transaction(
+                {
+                    "from": owner_addr,
+                    "nonce": nonce,
+                    "gas": default_gas_limit,
+                    "chainId": w3.eth.chain_id,
+                    **fees,
+                }
+            )
+            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "unban failed"))
+        except ContractLogicError as exc:
+            return tool_error(f"Contract rejected: {exc}")
+        except Exception as exc:
+            return tool_error(f"unban failed: {exc}")
+
+    register(
+        "unban",
+        "Owner-only: unban a borrower after remedy.",
+        {
+            "type": "object",
+            "properties": {"borrower_address": {"type": "string", "description": "Borrower wallet address."}},
+            "required": ["borrower_address"],
+        },
+        unban_tool,
+    )
+
+    return tools, handlers

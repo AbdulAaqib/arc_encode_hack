@@ -1,93 +1,96 @@
-# TrustMint — Dynamic, AI-Powered Credit on Arc
+# TrustMint — Identity‑based Lending on Arc (SBT + Pool MVP)
 
-A hackathon MVP that computes a dynamic credit reputation from on-chain + off-chain signals, issues an on-chain credential (SBT-style), and unlocks a USDC credit line on Arc.
-
----
-
-## Elevator Pitch
-
-TrustMint is an AI-powered credit engine built on Arc. It delivers dynamic financial reputations for digital creators and SMBs who are overlooked by banks or locked out of DeFi. TrustMint analyses both off-chain real-world financial data and on-chain behaviour, mints a non-transferable Soul-Bound Token (SBT)-style credential representing that reputation, and instantly unlocks a USDC-loan against it. By leveraging Arc’s predictable USDC gas-model and enterprise-grade infrastructure, we deliver smooth credit access to underserved users.
+A credit‑infrastructure MVP on Arc that lets underserved creators and SMBs access stable‑coin loans using a verifiable on‑chain credential and a unified credit score from on‑chain + off‑chain data.
 
 ---
 
-## The Problem
+## What it does
 
-- Many freelancers, micro-businesses and creators have non-traditional incomes or fragmented records, so banks reject them.
-- DeFi platforms usually demand large crypto collateral — unavailable to these users.
-- Their financial reputation exists, but is scattered and not leveraged in one place.
-- Therefore they are credit-invisible despite real financial health.
-
----
-
-## The Solution: TrustMint Journey
-
-1) User On-boards via Chat AI
-- The user interacts with a friendly AI agent (Streamlit web UI) that guides onboarding and eligibility.
-
-2) On-Chain Reputation
-- User enters their Arc wallet address. We compute a Web3 reputation from on-chain metrics (wallet age, activity, stability).
-
-3) Off-Chain Reputation
-- User uploads a financial document (e.g., bank statement PDF). An LLM parses net income, cash flow, expenses, consistency.
-
-4) Unified Score Calculation
-- AI merges both sources to compute a unified TrustMint Score.
-
-5) Mint the Credential (SBT-style)
-- For the MVP, we implement a Score Registry that is issuer-controlled and non-transferable (updatable mapping). In a next step this becomes a formal SBT NFT with metadata.
-
-6) Dynamic Updates
-- Reputation changes, so the credential is updatable by the issuer: issueScore overwrites current score; revokeScore marks it invalid.
-
-7) Loan Unlocking
-- With a valid score, a CreditLineManager contract determines how much USDC a borrower can draw.
-
-8) Use of Funds
-- USDC can be spent across Arc’s stablecoin-native ecosystem (payments, CCTP, off-ramping), giving real working capital utility.
+- Builds an identity‑based lending flow on Arc using a non‑transferable Soul‑Bound Token (SBT) as a verifiable credential.
+- Computes a TrustMint Score by merging on‑chain reputation (wallet history, activity) with off‑chain cash‑flow signals (uploaded docs).
+- Unlocks USDC working‑capital loans for eligible borrowers.
+- MVP ships SBT credential + credit line manager. Lender deposits/withdrawals are planned next (see Roadmap).
 
 ---
 
-## Why It Hits the Hackathon Themes
+## How it works (end‑to‑end)
 
-- Identity-based lending / verifiable credentials: The on-chain score is a verifiable credential read by the lending logic.
-- Reputation-driven credit with cash-flow: We combine on-chain behaviour + real-world financial data to underwrite, not just collateral.
-- SMB & creator credit: Explicitly targets the underserved.
-- Built for Arc: USDC-native gas model, EVM compatibility, sub-second finality, enterprise-grade infrastructure.
+1) Wallet Connection & Verification
+- User connects a wallet in the Streamlit app and (optionally) signs a message for ownership.
+
+2) Off‑Chain + On‑Chain Data Collection
+- On‑chain: fetch wallet metrics (wallet age, transaction activity/volume, behavior).
+- Off‑chain: user uploads bank statements or provides simplified income/expenses; system extracts net income, consistency, spend patterns.
+- A unified TrustMint Score is computed from both sources.
+
+3) Credential Issuance (SBT)
+- If the user meets criteria, the smart contract mints a non‑transferable SBT to their wallet representing their credit identity and current score.
+
+4) Lender Pool & Deposits (Planned in next iteration)
+- Lenders deposit USDC into a Lending Pool contract and receive a representation of their share (e.g., ERC‑4626‑style share token). Liquidity is used for borrower draws; lenders can later withdraw their share plus any returns.
+- For the MVP, you can seed liquidity directly into the CreditLineManager contract (send testnet USDC) to allow draws.
+
+5) Borrower Loan Draw
+- Borrower sees eligibility (e.g., "You’re eligible for X USDC").
+- Press "Draw"; contract verifies eligibility (SBT/score gating planned on‑chain; currently enforced off‑chain by issuer/governance who creates lines for eligible users) and available liquidity. On success, USDC is transferred to borrower.
+
+6) Borrower Repayment
+- Borrower repays (principal, or principal+return if enabled) and contract updates their outstanding balance/status.
+
+7) Lender Withdrawal & Returns (Planned)
+- As borrowers repay, the pool is replenished. Lenders can redeem their share for underlying USDC and any accrued return.
+
+8) Arc‑specific advantages
+- USDC‑native fees and predictable costs, making working‑capital lending practical. Sub‑second finality and EVM‑compatibility.
 
 ---
 
-## Key Architecture & Tech Highlights
+## Why this matters
 
-- Contracts (Solidity on Arc testnet)
-  - CreditScoreRegistry: issuer-only issueScore/revokeScore; view getScore(borrower) returns (value, timestamp, valid).
-  - CreditLineManager: creates and manages USDC-denominated credit lines; borrower can draw and repay; view availableCredit.
-- Streamlit UI (Python)
-  - Intro page (overview), Chatbot (Azure OpenAI + doc parsing), MCP Tools (contract calls: read score/credit, draw, revoke/issue).
-- AI + Data Integration
-  - On-chain via RPC; off-chain via document upload and LLM parsing (PDF/DOCX supported locally if packages installed).
-- Gas Sponsorship (future work)
-  - App wallet pays gas; Arc’s USDC gas model enables predictable fees and a smooth UX.
-- Security & Compliance (future work)
-  - Optional privacy, stablecoin-native environment, least-privileged issuer keys, revocation.
+- Identity‑based lending: The SBT acts as a verifiable on‑chain credential for credit identity.
+- Reputation‑driven credit: Combines on‑chain behavior with off‑chain cash‑flow, not pure crypto collateral.
+- Stable‑coin native: Loans are USDC‑denominated on Arc.
+- Lender/borrower market: Funds sourced from lenders; borrowers draw and repay; creates a full credit loop (pool planned in next iteration).
+
+---
+
+## Key Architecture & Contracts
+
+- TrustMintSBT.sol (deployed in MVP)
+  - Non‑transferable ERC‑721 (ERC‑5192 semantics); one token per wallet.
+  - Functions: `issueScore(borrower, value)`, `revokeScore(borrower)`, `getScore(borrower) -> (value, timestamp, valid)`, `hasSbt(wallet)`, `tokenIdOf(wallet)`.
+  - Metadata via `tokenURI`; transfer/burn disabled; owner is the issuer.
+
+- CreditLineManager.sol (deployed in MVP)
+  - Owner‑managed USDC credit lines with `limit`, `drawn`, `interestRate` (bps), and `availableCredit` view.
+  - `draw(borrower, amount)` transfers USDC held by the contract; `repay(borrower, amount)` returns USDC to the contract.
+  - Note: For MVP, seed this contract with testnet USDC so draws succeed. Lender deposit/withdraw flows are planned in the pool contract.
+
+- CreditScoreRegistry.sol (optional alternative)
+  - Minimal issuer‑only registry maintaining an updatable score mapping. Kept for compatibility and comparison with the SBT approach.
+
+- Lending Pool (planned)
+  - ERC‑4626‑style pool with deposits/withdrawals, LP tokens, and on‑chain verification of borrower credential and score.
 
 ---
 
 ## Repository Layout
 
-- blockchain_code/
-  - src/CreditScoreRegistry.sol — Updatable, issuer-controlled score mapping (MVP credential).
-  - src/CreditLineManager.sol — USDC credit line issuance, draw, repay, and available credit views.
-  - out/ — Foundry build artifacts (JSON with ABI under `abi` field).
-- streamlit/
-  - src/frontend/app.py — Streamlit entrypoint (loads .env from repo root).
-  - src/frontend/components/ — Chatbot, MCP Tools, Web3 helpers.
+- `blockchain_code/`
+  - `src/TrustMintSBT.sol` — SBT credential with score binding.
+  - `src/CreditLineManager.sol` — Credit lines: create, draw, repay, close, and `availableCredit`.
+  - `src/CreditScoreRegistry.sol` — Optional minimal registry.
+  - `out/` — Foundry build artifacts (ABIs under the `abi` field of each JSON).
+- `streamlit/`
+  - `src/frontend/app.py` — Streamlit entrypoint (auto‑loads `.env` at repo root).
+  - `src/frontend/components/` — Chatbot, MCP Tools (SBT‑focused), wallet connect, and helpers.
 
 ---
 
 ## Quickstart
 
 Prereqs
-- Python 3.10+ (repo includes a venv with 3.13), pip
+- Python 3.10+ (repo includes a venv with 3.13)
 - Foundry (forge, cast). Install: `curl -L https://foundry.paradigm.xyz | bash && foundryup`
 
 1) Clone + setup Python deps
@@ -99,12 +102,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2) Create .env at repo root
+2) Create `.env` at repo root
 
-The Streamlit app auto-loads `.env` from the repo root on startup.
+The Streamlit app auto‑loads `.env` from the repo root.
 
 ```bash
-# Azure OpenAI (for the Chatbot + MCP assistant)
+# Azure OpenAI (Chatbot + parsing)
 AZURE_OPENAI_ENDPOINT=your_azure_openai_endpoint
 AZURE_OPENAI_KEY=your_azure_openai_key
 AZURE_OPENAI_API_VERSION=2024-06-01
@@ -112,25 +115,20 @@ AZURE_OPENAI_CHAT_DEPLOYMENT=your_deployment_name  # e.g., gpt-4o-mini / gpt-4o
 
 # Arc RPC + signing key (LOCAL DEV ONLY — never commit or share)
 ARC_TESTNET_RPC_URL=https://arc-testnet.example.rpc  # replace with actual Arc testnet RPC
-PRIVATE_KEY=0xabc123...  # use a test-only key; sufficient testnet USDC balance is required to draw/repay
+PRIVATE_KEY=0xabc123...  # test-only key with minimal funds
 
-# Contract addresses (use deployed testnet addresses)
-CREDIT_SCORE_REGISTRY_ADDRESS=0xYourRegistryAddress
-# Optional (enables draw/repay panel in MCP Tools):
-CREDIT_LINE_MANAGER_ADDRESS=0xYourCreditLineManager
+# SBT contract (used by the MCP Tools UI)
+SBT_ADDRESS=0xYourDeployedSbt
+TRUSTMINT_SBT_ABI_PATH=blockchain_code/out/TrustMintSBT.sol/TrustMintSBT.json
 
-# ABI paths (point to Foundry build artifacts)
-# Use the Registry ABI for score tools or the Manager ABI for credit tools.
-ARC_CREDIT_LINE_MANAGER_ABI_PATH=blockchain_code/out/CreditScoreRegistry.sol/CreditScoreRegistry.json
-# Alternatively:
-# ARC_CREDIT_LINE_MANAGER_ABI_PATH=blockchain_code/out/CreditLineManager.sol/CreditLineManager.json
-
-# Tuning (optional)
+# Optional gas tuning
 ARC_USDC_DECIMALS=6
 ARC_GAS_LIMIT=200000
 ARC_GAS_PRICE_GWEI=1
-CHATBOT_ATTACHMENT_MAX_CHARS=6000
-CHAT_PREVIEW_MAX_CHARS=1000
+
+# Optional advanced (CLI only for now)
+# CREDIT_LINE_MANAGER_ADDRESS=0xYourCreditLineManager
+# CREDIT_LINE_MANAGER_ABI_PATH=blockchain_code/out/CreditLineManager.sol/CreditLineManager.json
 ```
 
 3) Build and (optionally) deploy contracts with Foundry
@@ -141,23 +139,37 @@ forge build
 # run tests
 forge test -vv
 
-# deploy CreditScoreRegistry (constructor: initialOwner)
-forge create src/CreditScoreRegistry.sol:CreditScoreRegistry \
+# Deploy SBT (constructor: name, symbol, initialOwner)
+forge create src/TrustMintSBT.sol:TrustMintSBT \
   --rpc-url "$ARC_TESTNET_RPC_URL" \
   --private-key "$PRIVATE_KEY" \
-  --constructor-args 0xYourOwnerAddress
+  --constructor-args "TrustMint SBT" TMSBT 0xYourOwnerAddress
 
-# deploy CreditLineManager (constructor: IERC20 stablecoin, initialOwner)
-# Use the Arc testnet USDC address for the first argument
+# Optional: Deploy CreditLineManager (constructor: IERC20 stablecoin, initialOwner)
+# Use Arc testnet USDC address for the first argument, then set CREDIT_LINE_MANAGER_ADDRESS in .env
 forge create src/CreditLineManager.sol:CreditLineManager \
   --rpc-url "$ARC_TESTNET_RPC_URL" \
   --private-key "$PRIVATE_KEY" \
   --constructor-args 0xArcTestnetUSDC 0xYourOwnerAddress
 ```
 
-Copy the deployed addresses into `.env` as `CREDIT_SCORE_REGISTRY_ADDRESS` and, if using the draw/repay features, `CREDIT_LINE_MANAGER_ADDRESS`.
+Copy the deployed addresses into `.env` (`SBT_ADDRESS`, optionally `CREDIT_LINE_MANAGER_ADDRESS`).
 
-4) Run the Streamlit app
+4) Interact via CLI (SBT)
+
+```bash
+# Read score + SBT
+cast call $SBT_ADDRESS "hasSbt(address)(bool)" 0xSomeWallet --rpc-url $ARC_TESTNET_RPC_URL
+cast call $SBT_ADDRESS "getScore(address)(uint256,uint256,bool)" 0xSomeWallet --rpc-url $ARC_TESTNET_RPC_URL
+
+# Issue / revoke (owner only)
+cast send $SBT_ADDRESS "issueScore(address,uint256)" 0xSomeWallet 720 \
+  --rpc-url $ARC_TESTNET_RPC_URL --private-key $PRIVATE_KEY
+cast send $SBT_ADDRESS "revokeScore(address)" 0xSomeWallet \
+  --rpc-url $ARC_TESTNET_RPC_URL --private-key $PRIVATE_KEY
+```
+
+5) Run the Streamlit app
 
 ```bash
 # From repo root (ensure your .env is in the repo root)
@@ -165,56 +177,66 @@ source venv/bin/activate
 streamlit run streamlit/src/frontend/app.py
 ```
 
-Navigate through the sidebar:
+Navigate via the sidebar:
 - Intro — project overview and setup reminders
-- Chatbot — Azure OpenAI-powered assistant; can include document uploads; will guide you to configure env vars
-- MCP Tools — interactive panel for reading score/credit, and sending transactions (if PRIVATE_KEY is set)
+- Chatbot — Azure OpenAI‑powered assistant with doc uploads for off‑chain parsing
+- MCP Tools — interactive panel for SBT calls: hasSbt, getScore, issueScore, revokeScore
 
 ---
 
 ## Demo Flow (MVP)
 
-- Enter a wallet address in Tools or ask the Chatbot to inspect it → reads `getScore` and `availableCredit`.
-- Issue a score for a borrower (issuer-only, via Tools or LLM tool) → `issueScore(borrower, value)` records value/timestamp and sets valid=true.
-- Revoke a score (issuer-only) → `revokeScore(borrower)` sets valid=false.
-- Create a credit line (owner-only) → `createCreditLine(borrower, limit, interestBps)`.
-- Borrower draws funds → `draw(borrower, amount)` transfers USDC to borrower if within limit.
-- Borrower repays → `repay(borrower, amount)`.
-- Observe that an increased score (issuer update) can be reflected in UI and lending terms.
+- Connect a wallet and check eligibility via the UI/CLI.
+- Issue a score for a borrower (issuer‑only) → `issueScore(borrower, value)` stores value/timestamp, sets valid=true, and mints SBT if missing.
+- Revoke a score (issuer‑only) → `revokeScore(borrower)` sets valid=false; SBT remains non‑transferable and bound.
+- Optional (CLI): Create a credit line (owner‑only), seed the CreditLineManager with testnet USDC, then draw/repay.
+  - Create: `createCreditLine(borrower, limit, interestBps)`
+  - Draw: `draw(borrower, amount)` (transfers USDC held by the contract)
+  - Repay: `repay(borrower, amount)` (requires ERC20 allowance)
+
+---
+
+## Design: Lender Pool & Returns (Planned)
+
+- Deposits: Lenders deposit USDC into a dedicated pool contract and receive a share token (likely ERC‑4626) representing their portion of the liquidity.
+- Draws: Borrowers meeting SBT/score criteria draw from the pool subject to utilization and policy.
+- Repayment: Principal (and optionally interest/fees) replenishes the pool.
+- Withdrawals: Lenders redeem their shares for underlying USDC and any accrued return.
+- Transparency: On‑chain metrics reveal utilization, borrower behavior, and pool health.
+
+For the MVP, pool functions are not yet implemented on‑chain. Seed liquidity directly to `CreditLineManager` to enable draws.
+
+---
+
+## Arc‑specific notes
+
+- USDC‑native gas model enables predictable fees and smooth UX.
+- EVM‑compatible, sub‑second finality; easy integration with wallets and tooling.
+- Replace example RPC endpoints and USDC addresses with Arc testnet values for your environment.
 
 ---
 
 ## Business Model (Concept)
 
-- Underwriting fee or small interest spread.
+- Underwriting fee or a small interest spread.
 - Tiered services (higher scores → larger limits, lower rates).
-- Partnerships with SMB/creator tooling (accounting, payments) for funnel + data integrations.
-- Optional aggregated insights (with permission, anonymized) for lenders/insurers.
+- Partnerships with SMB/creator tools for distribution and richer data.
+- Optional aggregated, privacy‑preserving insights for lenders/insurers.
 
 ---
 
 ## Roadmap
 
-- Formal SBT implementation (non-transferable ERC-721 with metadata pointing to score and proofs).
-- Gas sponsorship for mint/update flows.
-- Robust score model: merge on-chain analytics + off-chain bank data, invoices, platform revenue.
-- Risk management, interest accrual, late fees, liquidations.
-- Lender UI and third-party verifier interface using the SBT credential.
+- Implement Lending Pool: deposits/withdrawals with ERC‑4626 shares; on‑chain checks for SBT + score; liquidity accounting and return distribution.
+- Gas sponsorship for mint/update flows; UX polish.
+- Score model hardening: merge deeper on‑chain analytics + off‑chain bank data, invoices, platform revenue.
+- Full risk management: interest accrual, late fees, delinquency handling.
+- Lender dashboard and third‑party verifier interface using the SBT credential.
 
 ---
 
 ## Notes & Disclaimers
 
 - This repository is for hackathon/demo use on testnets. Do not use real keys or funds.
-- PRIVATE_KEY must remain private; recommended to use a dedicated test wallet with minimal funds.
+- Use a dedicated test wallet with minimal funds for `PRIVATE_KEY`.
 - RPC endpoints and USDC addresses differ per network; replace placeholders with actual Arc testnet values.
-
----
-
-## Want a 2-slide deck?
-
-Happy to generate:
-- Slide 1 — Problem + Solution (TrustMint Journey)
-- Slide 2 — Architecture + Business + Ask
-
-Open an issue or ping in chat to export a tailored deck outline.

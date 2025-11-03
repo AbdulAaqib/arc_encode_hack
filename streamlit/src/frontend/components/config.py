@@ -21,3 +21,19 @@ from typing import Optional, Tuple
 def get_sbt_address() -> Tuple[Optional[str], str]:
     addr = os.getenv(SBT_ADDRESS_ENV)
     return (addr, SBT_ADDRESS_ENV) if addr else (None, "")
+# LendingPool + USDC env keys for MCP tools
+LENDING_POOL_ADDRESS_ENV = "LENDING_POOL_ADDRESS"
+LENDING_POOL_ABI_PATH_ENV = "LENDING_POOL_ABI_PATH"
+USDC_ADDRESS_ENV = "USDC_ADDRESS"
+USDC_ABI_PATH_ENV = "USDC_ABI_PATH"
+
+
+def get_lending_pool_address() -> Tuple[Optional[str], str]:
+    addr = os.getenv(LENDING_POOL_ADDRESS_ENV)
+    return (addr, LENDING_POOL_ADDRESS_ENV) if addr else (None, "")
+
+
+def get_usdc_address() -> Tuple[Optional[str], str]:
+    addr = os.getenv(USDC_ADDRESS_ENV)
+    return (addr, USDC_ADDRESS_ENV) if addr else (None, "")
+

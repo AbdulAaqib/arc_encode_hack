@@ -186,41 +186,81 @@ def render_chatbot_page() -> None:
             st.warning(warning)
         return
 
-    # Build Web3 + contract for MCP tools (single chat experience, tool-enabled)
+    # Build Web3 + contracts for MCP tools
+    from .config import (
+        ARC_RPC_ENV,
+        PRIVATE_KEY_ENV,
+        GAS_LIMIT_ENV,
+        GAS_PRICE_GWEI_ENV,
+        SBT_ADDRESS_ENV,
+        TRUSTMINT_SBT_ABI_PATH_ENV,
+        LENDING_POOL_ADDRESS_ENV,
+        LENDING_POOL_ABI_PATH_ENV,
+        USDC_ADDRESS_ENV,
+        USDC_ABI_PATH_ENV,
+        USDC_DECIMALS_ENV,
+    )
+
     rpc_url = os.getenv(ARC_RPC_ENV)
-    contract_address = os.getenv(SBT_ADDRESS_ENV)
-    abi_path = os.getenv(TRUSTMINT_SBT_ABI_PATH_ENV)
     private_key = os.getenv(PRIVATE_KEY_ENV)
-    token_decimals = 0
     default_gas_limit = int(os.getenv(GAS_LIMIT_ENV, "200000"))
     gas_price_gwei = os.getenv(GAS_PRICE_GWEI_ENV, "1")
 
     w3 = get_web3_client(rpc_url)
-    abi = load_contract_abi(abi_path)
-
     if w3 is None:
-        st.info("Connect to the RPC and provide TrustMintSBT details to unlock MCP tools in chat.")
-        return
-    if not abi or not contract_address:
-        st.info(
-            "Set `SBT_ADDRESS` and `TRUSTMINT_SBT_ABI_PATH` in `.env` to unlock MCP tools."
-        )
+        st.info("Connect to the RPC to unlock MCP tools in chat.")
         return
 
-    try:
-        contract = w3.eth.contract(address=Web3.to_checksum_address(contract_address), abi=abi)
-    except Exception as exc:
-        st.error(f"Unable to build contract instance: {exc}")
-        return
+    # SBT
+    sbt_address = os.getenv(SBT_ADDRESS_ENV)
+    sbt_abi_path = os.getenv(TRUSTMINT_SBT_ABI_PATH_ENV)
+    sbt_tools_schema = []
+    sbt_function_map = {}
+    if sbt_address and sbt_abi_path:
+        sbt_abi = load_contract_abi(sbt_abi_path)
+        try:
+            sbt_contract = w3.eth.contract(address=Web3.to_checksum_address(sbt_address), abi=sbt_abi)
+            from .toolkit import build_llm_toolkit
+            sbt_tools_schema, sbt_function_map = build_llm_toolkit(
+                w3=w3,
+                contract=sbt_contract,
+                token_decimals=0,
+                private_key=private_key,
+                default_gas_limit=default_gas_limit,
+                gas_price_gwei=gas_price_gwei,
+            )
+        except Exception:
+            pass
 
-    tools_schema, function_map = build_llm_toolkit(
-        w3=w3,
-        contract=contract,
-        token_decimals=token_decimals,
-        private_key=private_key,
-        default_gas_limit=default_gas_limit,
-        gas_price_gwei=gas_price_gwei,
-    )
+    # LendingPool
+    pool_address = os.getenv(LENDING_POOL_ADDRESS_ENV)
+    pool_abi_path = os.getenv(LENDING_POOL_ABI_PATH_ENV)
+    usdc_address = os.getenv(USDC_ADDRESS_ENV)
+    usdc_abi_path = os.getenv(USDC_ABI_PATH_ENV)
+    usdc_decimals = int(os.getenv(USDC_DECIMALS_ENV, "6"))
+    pool_tools_schema = []
+    pool_function_map = {}
+    if pool_address and pool_abi_path:
+        pool_abi = load_contract_abi(pool_abi_path)
+        usdc_abi = load_contract_abi(usdc_abi_path) if usdc_abi_path else None
+        try:
+            pool_contract = w3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=pool_abi)
+            from .toolkit import build_lending_pool_toolkit
+            pool_tools_schema, pool_function_map = build_lending_pool_toolkit(
+                w3=w3,
+                pool_contract=pool_contract,
+                usdc_address=usdc_address,
+                usdc_abi=usdc_abi,
+                usdc_decimals=usdc_decimals,
+                private_key=private_key,
+                default_gas_limit=default_gas_limit,
+                gas_price_gwei=gas_price_gwei,
+            )
+        except Exception:
+            pass
+
+    tools_schema = sbt_tools_schema + pool_tools_schema
+    function_map = {**sbt_function_map, **pool_function_map}
 
     if not tools_schema:
         st.warning("No MCP tools are available for the current contract configuration.")
