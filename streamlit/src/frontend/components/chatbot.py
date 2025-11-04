@@ -8,6 +8,8 @@ from typing import Iterable, Optional
 
 import streamlit as st
 from io import BytesIO
+from streamlit_lottie import st_lottie, st_lottie_spinner
+import json
 
 openai_spec = importlib.util.find_spec("openai")
 if openai_spec is not None:  # pragma: no cover - imported at runtime when available
@@ -267,10 +269,19 @@ def render_chatbot_page() -> None:
         return
 
     # Tool-enabled chat loop (single chat)
-    with st.spinner("GPT 5 is orchestrating MCP tools…"):
-        _run_mcp_llm_conversation(
-            client, deployment, st.session_state.messages, tools_schema, function_map
-        )
+    waves = _load_lottie_json(_WAVES_PATH)
+    if waves:
+        # Show a Lottie spinner inside an assistant bubble while waiting
+        with st.chat_message("assistant"):
+            with st_lottie_spinner(waves, key="waves_spinner"):
+                _run_mcp_llm_conversation(
+                    client, deployment, st.session_state.messages, tools_schema, function_map
+                )
+    else:
+        with st.spinner("GPT 5 is orchestrating MCP tools…"):
+            _run_mcp_llm_conversation(
+                client, deployment, st.session_state.messages, tools_schema, function_map
+            )
 
     return
 
@@ -324,6 +335,16 @@ _MCP_SYSTEM_PROMPT = (
     "You are PawChain's MCP automation copilot. Use the provided tools to check TrustMint SBT status and read/update "
     "credit scores on Arc. Prefer calling tools before responding, summarize results for the user, and suggest next steps."
 )
+
+_WAVES_PATH = "/Users/abdulaaqib/Developer/Github/arc_encode_hack/streamlit/src/frontend/lottie_files/Waves.json"
+
+
+def _load_lottie_json(filepath: str) -> dict | None:
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def _run_mcp_llm_conversation(
@@ -464,5 +485,11 @@ def render_mcp_llm_playground_section() -> None:
     messages.append({"role": "user", "content": prompt})
 
     with st.spinner("Azure OpenAI is orchestrating MCP tools…"):
-        _run_mcp_llm_conversation(client, deployment, messages, tools_schema, function_map)
+        # Prefer Lottie spinner if available
+        waves = _load_lottie_json(_WAVES_PATH)
+        if waves:
+            with st_lottie_spinner(waves, key="waves_spinner_playground"):
+                _run_mcp_llm_conversation(client, deployment, messages, tools_schema, function_map)
+        else:
+            _run_mcp_llm_conversation(client, deployment, messages, tools_schema, function_map)
 

@@ -22,6 +22,20 @@ from web3 import Web3
 from web3.contract import Contract
 from web3.exceptions import ContractLogicError, Web3Exception
 
+from .config import (
+    ARC_RPC_ENV,
+    SBT_ADDRESS_ENV,
+    TRUSTMINT_SBT_ABI_PATH_ENV,
+    PRIVATE_KEY_ENV,
+    GAS_LIMIT_ENV,
+    GAS_PRICE_GWEI_ENV,
+    USDC_DECIMALS_ENV,
+    LENDING_POOL_ADDRESS_ENV,
+    LENDING_POOL_ABI_PATH_ENV,
+    get_sbt_address,
+)
+from .wallet_connect_component import connect_wallet, wallet_command
+
 
 # ===== UI helpers (kept for Chatbot and pages) =====
 
@@ -192,6 +206,21 @@ def _format_receipt(receipt: Any) -> dict[str, Any]:
     }
 
 
+def _metamask_tx_request(contract: Contract, fn_name: str, args: list[Any], value_wei: int = 0) -> Dict[str, Any]:
+    """Build a minimal eth_sendTransaction request for MetaMask: {to, data, value}."""
+
+    data_hex: str
+    try:
+        data_hex = contract.encodeABI(fn_name, args=args)
+    except Exception:
+        fn = getattr(contract.functions, fn_name)(*args)
+        data_hex = fn._encode_transaction_data()  # type: ignore[attr-defined]
+    req: Dict[str, Any] = {"to": contract.address, "data": data_hex}
+    if value_wei:
+        req["value"] = hex(value_wei)
+    return req
+
+
 # ===== Public entry: build SBT-only tools =====
 
 def build_llm_toolkit(
@@ -203,6 +232,7 @@ def build_llm_toolkit(
     default_gas_limit: int,
     gas_price_gwei: str,
 ) -> Tuple[list[Dict[str, Any]], Dict[str, Callable[..., str]]]:
+    derived_private_key = private_key or os.getenv(PRIVATE_KEY_ENV)
     tools: list[Dict[str, Any]] = []
     handlers: Dict[str, Callable[..., str]] = {}
 
@@ -387,14 +417,14 @@ def build_llm_toolkit(
         return False
 
     def issueScore_tool(wallet_address: str, score_value: int) -> str:
-        if not private_key:
+        if not derived_private_key:
             return tool_error("PRIVATE_KEY not configured. Configure it in .env to submit transactions.")
         try:
             checksum_wallet = Web3.to_checksum_address(wallet_address)
         except ValueError:
             return tool_error("Invalid wallet address supplied.")
         try:
-            owner_acct = w3.eth.account.from_key(private_key)
+            owner_acct = w3.eth.account.from_key(derived_private_key)
         except Exception as exc:
             return tool_error(f"Unable to derive signer from private key: {exc}")
         # Owner check (when available)
@@ -432,7 +462,7 @@ def build_llm_toolkit(
                     **fees,
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)
+            sent = _sign_and_send(w3, derived_private_key, tx)
             if "error" in sent:
                 # Retry once with fee bump if underpriced
                 if sent.get("status") == "underpriced" or "underpriced" in sent.get("error", ""):
@@ -447,7 +477,7 @@ def build_llm_toolkit(
                     tx["nonce"] = nonce  # same nonce to replace
                     for k, v in fees_bumped.items():
                         tx[k] = v
-                    sent = _sign_and_send(w3, private_key, tx)
+                    sent = _sign_and_send(w3, derived_private_key, tx)
                 if "error" in sent:
                     return tool_error(sent["error"]) if isinstance(sent["error"], str) else tool_error(str(sent["error"]))
             return tool_success(sent)
@@ -473,14 +503,14 @@ def build_llm_toolkit(
     )
 
     def revokeScore_tool(wallet_address: str) -> str:
-        if not private_key:
+        if not derived_private_key:
             return tool_error("PRIVATE_KEY not configured. Configure it in .env to submit transactions.")
         try:
             checksum_wallet = Web3.to_checksum_address(wallet_address)
         except ValueError:
             return tool_error("Invalid wallet address supplied.")
         try:
-            owner_acct = w3.eth.account.from_key(private_key)
+            owner_acct = w3.eth.account.from_key(derived_private_key)
         except Exception as exc:
             return tool_error(f"Unable to derive signer from private key: {exc}")
         # Owner check (when available)
@@ -517,7 +547,7 @@ def build_llm_toolkit(
                     **fees,
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)
+            sent = _sign_and_send(w3, derived_private_key, tx)
             if "error" in sent:
                 # Retry once with fee bump if underpriced
                 if sent.get("status") == "underpriced" or "underpriced" in sent.get("error", ""):
@@ -531,7 +561,7 @@ def build_llm_toolkit(
                     tx["nonce"] = nonce
                     for k, v in fees_bumped.items():
                         tx[k] = v
-                    sent = _sign_and_send(w3, private_key, tx)
+                    sent = _sign_and_send(w3, derived_private_key, tx)
                 if "error" in sent:
                     return tool_error(sent["error"]) if isinstance(sent["error"], str) else tool_error(str(sent["error"]))
             return tool_success(sent)
@@ -544,7 +574,7 @@ def build_llm_toolkit(
 
     register(
         "revokeScore",
-        "Revoke a previously issued TrustMint SBT credit score (owner-only).",
+        "Revoke (invalidate) an SBT borrower score (owner-only).",
         {
             "type": "object",
             "properties": {"wallet_address": {"type": "string", "description": "Borrower wallet address."}},
@@ -561,9 +591,7 @@ def build_lending_pool_toolkit(
     *,
     w3: Web3,
     pool_contract: Contract,
-    usdc_address: Optional[str],
-    usdc_abi: Optional[list[dict[str, Any]]],
-    usdc_decimals: int,
+    token_decimals: int,
     private_key: Optional[str],
     default_gas_limit: int,
     gas_price_gwei: str,
@@ -571,47 +599,21 @@ def build_lending_pool_toolkit(
     tools: list[Dict[str, Any]] = []
     handlers: Dict[str, Callable[..., str]] = {}
 
+    derived_private_key = private_key or os.getenv(PRIVATE_KEY_ENV)
+
     def register(name: str, description: str, parameters: Dict[str, Any], handler: Callable[..., str]) -> None:
         tools.append({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
         handlers[name] = handler
 
-    # Minimal ERC20 ABI if none provided
-    erc20_abi = usdc_abi or [
-        {
-            "name": "approve",
-            "type": "function",
-            "stateMutability": "nonpayable",
-            "inputs": [
-                {"name": "spender", "type": "address"},
-                {"name": "amount", "type": "uint256"},
-            ],
-            "outputs": [{"name": "", "type": "bool"}],
-        },
-        {
-            "name": "balanceOf",
-            "type": "function",
-            "stateMutability": "view",
-            "inputs": [{"name": "account", "type": "address"}],
-            "outputs": [{"name": "", "type": "uint256"}],
-        },
-    ]
-
-    usdc_contract: Optional[Contract] = None
-    if usdc_address:
-        try:
-            usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(usdc_address), abi=erc20_abi)
-        except Exception:
-            usdc_contract = None
-
     # Helpers
     def _check_pk() -> Optional[str]:
-        if not private_key:
+        if not derived_private_key:
             return "PRIVATE_KEY not configured. Configure it in .env to submit transactions."
         return None
 
     def _acct() -> Optional[str]:
         try:
-            return w3.eth.account.from_key(private_key).address  # type: ignore[arg-type]
+            return w3.eth.account.from_key(derived_private_key).address  # type: ignore[arg-type]
         except Exception:
             return None
 
@@ -621,7 +623,7 @@ def build_lending_pool_toolkit(
     def _to_token_units(amount: float | int) -> int:
         try:
             amt = Decimal(str(amount))
-            scale = Decimal(10) ** int(usdc_decimals)
+            scale = Decimal(10) ** int(token_decimals)
             return int(amt * scale)
         except Exception:
             return int(amount)
@@ -709,70 +711,25 @@ def build_lending_pool_toolkit(
     )
 
     # ---- Writes ----
-    def approveUSDC_tool(amount: float | int) -> str:
-        msg = _check_pk()
-        if msg:
-            return tool_error(msg)
-        if not usdc_contract:
-            return tool_error("USDC contract not initialized; set USDC_ADDRESS and USDC_ABI_PATH (or use minimal ABI).")
-        try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
-            amt = _to_token_units(amount)
-            tx = usdc_contract.functions.approve(pool_contract.address, amt).build_transaction(
-                {
-                    "from": owner_addr,
-                    "nonce": nonce,
-                    "gas": default_gas_limit,
-                    "chainId": w3.eth.chain_id,
-                    **fees,
-                }
-            )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
-            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "approve failed"))
-        except Exception as exc:
-            return tool_error(f"Approve failed: {exc}")
-
-    register(
-        "approveUSDC",
-        "Approve the LendingPool to spend your USDC for deposits/repayments.",
-        {
-            "type": "object",
-            "properties": {"amount": {"type": "number", "description": "Amount in human units (e.g., 1.5 USDC)."}},
-            "required": ["amount"],
-        },
-        approveUSDC_tool,
-    )
-
     def deposit_tool(amount: float | int) -> str:
-        msg = _check_pk()
-        if msg:
-            return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
             amt = _to_token_units(amount)
-            tx = pool_contract.functions.deposit(amt).build_transaction(
+        except Exception as exc:
+            return tool_error(f"Invalid amount: {exc}")
+        try:
+            tx_req = _metamask_tx_request(pool_contract, "deposit", [amt], value_wei=amt)
+            return tool_success(
                 {
-                    "from": owner_addr,
-                    "nonce": nonce,
-                    "gas": default_gas_limit,
-                    "chainId": w3.eth.chain_id,
-                    **fees,
+                    "metamask": {
+                        "tx_request": tx_req,
+                        "action": "eth_sendTransaction",
+                        "chainId": w3.eth.chain_id,
+                        "hint": "Use MetaMask (lender wallet) to deposit native USDC into the pool.",
+                    }
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
-            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "deposit failed"))
-        except ContractLogicError as exc:
-            return tool_error(f"Contract rejected: {exc}")
         except Exception as exc:
-            return tool_error(f"Deposit failed: {exc}")
+            return tool_error(f"Unable to build MetaMask tx: {exc}")
 
     register(
         "deposit",
@@ -786,31 +743,24 @@ def build_lending_pool_toolkit(
     )
 
     def withdraw_tool(amount: float | int) -> str:
-        msg = _check_pk()
-        if msg:
-            return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
             amt = _to_token_units(amount)
-            tx = pool_contract.functions.withdraw(amt).build_transaction(
+        except Exception as exc:
+            return tool_error(f"Invalid amount: {exc}")
+        try:
+            tx_req = _metamask_tx_request(pool_contract, "withdraw", [amt])
+            return tool_success(
                 {
-                    "from": owner_addr,
-                    "nonce": nonce,
-                    "gas": default_gas_limit,
-                    "chainId": w3.eth.chain_id,
-                    **fees,
+                    "metamask": {
+                        "tx_request": tx_req,
+                        "action": "eth_sendTransaction",
+                        "chainId": w3.eth.chain_id,
+                        "hint": "Use MetaMask (lender wallet) to withdraw unlocked funds.",
+                    }
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
-            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "withdraw failed"))
-        except ContractLogicError as exc:
-            return tool_error(f"Contract rejected: {exc}")
         except Exception as exc:
-            return tool_error(f"Withdraw failed: {exc}")
+            return tool_error(f"Unable to build MetaMask tx: {exc}")
 
     register(
         "withdraw",
@@ -824,9 +774,27 @@ def build_lending_pool_toolkit(
     )
 
     def openLoan_tool(borrower_address: str, principal: float | int, term_seconds: int) -> str:
-        msg = _check_pk()
-        if msg:
-            return tool_error(msg)
+        if not derived_private_key:
+            try:
+                borrower = Web3.to_checksum_address(borrower_address)
+            except ValueError:
+                return tool_error("Invalid borrower address supplied.")
+            try:
+                principal_units = _to_token_units(principal)
+            except Exception as exc:
+                return tool_error(f"Invalid principal: {exc}")
+            try:
+                tx_req = _metamask_tx_request(pool_contract, "openLoan", [borrower, principal_units, int(term_seconds)])
+                return tool_success({
+                    "metamask": {
+                        "tx_request": tx_req,
+                        "action": "eth_sendTransaction",
+                        "chainId": w3.eth.chain_id,
+                        "hint": "Use MetaMask (lender wallet) to open a loan."
+                    }
+                })
+            except Exception as exc:
+                return tool_error(f"Unable to build MetaMask tx: {exc}")
         try:
             owner_addr = _acct()
             if not owner_addr:
@@ -844,7 +812,7 @@ def build_lending_pool_toolkit(
                     **fees,
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            sent = _sign_and_send(w3, derived_private_key, tx)  # type: ignore[arg-type]
             return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "openLoan failed"))
         except ContractLogicError as exc:
             return tool_error(f"Contract rejected: {exc}")
@@ -867,31 +835,24 @@ def build_lending_pool_toolkit(
     )
 
     def repay_tool(amount: float | int) -> str:
-        msg = _check_pk()
-        if msg:
-            return tool_error(msg)
         try:
-            borrower_addr = _acct()
-            if not borrower_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
-            fees = _fees()
-            nonce = _next_nonce(w3, borrower_addr)
             amt = _to_token_units(amount)
-            tx = pool_contract.functions.repay(amt).build_transaction(
+        except Exception as exc:
+            return tool_error(f"Invalid amount: {exc}")
+        try:
+            tx_req = _metamask_tx_request(pool_contract, "repay", [amt], value_wei=amt)
+            return tool_success(
                 {
-                    "from": borrower_addr,
-                    "nonce": nonce,
-                    "gas": default_gas_limit,
-                    "chainId": w3.eth.chain_id,
-                    **fees,
+                    "metamask": {
+                        "tx_request": tx_req,
+                        "action": "eth_sendTransaction",
+                        "chainId": w3.eth.chain_id,
+                        "hint": "Use MetaMask (borrower wallet) to repay the loan.",
+                    }
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
-            return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "repay failed"))
-        except ContractLogicError as exc:
-            return tool_error(f"Contract rejected: {exc}")
         except Exception as exc:
-            return tool_error(f"Repay failed: {exc}")
+            return tool_error(f"Unable to build MetaMask tx: {exc}")
 
     register(
         "repay",
@@ -909,22 +870,19 @@ def build_lending_pool_toolkit(
         if msg:
             return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
             borrower = Web3.to_checksum_address(borrower_address)
             fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
+            nonce = _next_nonce(w3, _acct())
             tx = pool_contract.functions.checkDefaultAndBan(borrower).build_transaction(
                 {
-                    "from": owner_addr,
+                    "from": _acct(),
                     "nonce": nonce,
                     "gas": default_gas_limit,
                     "chainId": w3.eth.chain_id,
                     **fees,
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            sent = _sign_and_send(w3, derived_private_key, tx)  # type: ignore[arg-type]
             return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "checkDefaultAndBan failed"))
         except ContractLogicError as exc:
             return tool_error(f"Contract rejected: {exc}")
@@ -947,21 +905,16 @@ def build_lending_pool_toolkit(
         if msg:
             return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
             tx = pool_contract.functions.setDepositLockSeconds(int(seconds)).build_transaction(
                 {
-                    "from": owner_addr,
-                    "nonce": nonce,
+                    "from": _acct(),
+                    "nonce": _next_nonce(w3, _acct()),
                     "gas": default_gas_limit,
                     "chainId": w3.eth.chain_id,
-                    **fees,
+                    **_fees(),
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            sent = _sign_and_send(w3, derived_private_key, tx)  # type: ignore[arg-type]
             return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "setDepositLockSeconds failed"))
         except ContractLogicError as exc:
             return tool_error(f"Contract rejected: {exc}")
@@ -984,22 +937,17 @@ def build_lending_pool_toolkit(
         if msg:
             return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
             sbt = Web3.to_checksum_address(sbt_address)
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
             tx = pool_contract.functions.setTrustMintSbt(sbt).build_transaction(
                 {
-                    "from": owner_addr,
-                    "nonce": nonce,
+                    "from": _acct(),
+                    "nonce": _next_nonce(w3, _acct()),
                     "gas": default_gas_limit,
                     "chainId": w3.eth.chain_id,
-                    **fees,
+                    **_fees(),
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            sent = _sign_and_send(w3, derived_private_key, tx)  # type: ignore[arg-type]
             return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "setTrustMintSbt failed"))
         except ContractLogicError as exc:
             return tool_error(f"Contract rejected: {exc}")
@@ -1022,21 +970,16 @@ def build_lending_pool_toolkit(
         if msg:
             return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
             tx = pool_contract.functions.setMinScoreToBorrow(int(new_min_score)).build_transaction(
                 {
-                    "from": owner_addr,
-                    "nonce": nonce,
+                    "from": _acct(),
+                    "nonce": _next_nonce(w3, _acct()),
                     "gas": default_gas_limit,
                     "chainId": w3.eth.chain_id,
-                    **fees,
+                    **_fees(),
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            sent = _sign_and_send(w3, derived_private_key, tx)  # type: ignore[arg-type]
             return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "setMinScoreToBorrow failed"))
         except ContractLogicError as exc:
             return tool_error(f"Contract rejected: {exc}")
@@ -1059,22 +1002,17 @@ def build_lending_pool_toolkit(
         if msg:
             return tool_error(msg)
         try:
-            owner_addr = _acct()
-            if not owner_addr:
-                return tool_error("Invalid PRIVATE_KEY; cannot derive signer address.")
             borrower = Web3.to_checksum_address(borrower_address)
-            fees = _fees()
-            nonce = _next_nonce(w3, owner_addr)
             tx = pool_contract.functions.unban(borrower).build_transaction(
                 {
-                    "from": owner_addr,
-                    "nonce": nonce,
+                    "from": _acct(),
+                    "nonce": _next_nonce(w3, _acct()),
                     "gas": default_gas_limit,
                     "chainId": w3.eth.chain_id,
-                    **fees,
+                    **_fees(),
                 }
             )
-            sent = _sign_and_send(w3, private_key, tx)  # type: ignore[arg-type]
+            sent = _sign_and_send(w3, derived_private_key, tx)  # type: ignore[arg-type]
             return tool_success(sent) if "error" not in sent else tool_error(sent.get("error", "unban failed"))
         except ContractLogicError as exc:
             return tool_error(f"Contract rejected: {exc}")

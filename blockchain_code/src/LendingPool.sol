@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /// @notice Minimal interface for TrustMintSBT used for gating
 interface ITrustMintSBT {
@@ -13,35 +13,35 @@ interface ITrustMintSBT {
 
 /**
  * @title LendingPool
- * @notice Holds stablecoin liquidity deposited by lenders and issues loans to borrowers.
- *         Tracks loans with due dates; bans borrowers who fail to repay on time.
- *         Optional SBT/score gating via TrustMintSBT.
+ * @notice Accepts native-token deposits (USDC-denominated on Arc), issues loans, and enforces timed lender withdrawals.
+ *         Funds are transferred into the pool contract immediately; borrowers repay in native token as well.
  */
-contract LendingPool is Ownable {
-    using SafeERC20 for IERC20;
-
-    // --- Immutable token ---
-    IERC20 public immutable STABLECOIN; // e.g., USDC
-
+contract LendingPool is Ownable, ReentrancyGuard {
     // --- Optional credential gating ---
     address public trustMintSbt; // set to 0x0 to disable SBT/score checks
-    uint256 public minScoreToBorrow = 600; // simple threshold for demo; adjust per policy
+    uint256 public minScoreToBorrow = 600;
 
     // --- Lender accounting ---
-    mapping(address => uint256) public deposits;     // total deposited by lender
-    mapping(address => uint256) public withdrawals;  // total withdrawn by lender
-    uint256 public totalDeposits;                    // sum of deposits
-    // Global lock: lenders can withdraw only after this lock duration from their last deposit
-    uint256 public depositLockSeconds;              // 0 means no lock
-    mapping(address => uint256) public lockedUntil; // per-lender unlock timestamp
+    struct DepositEntry {
+        uint128 amount;     // remaining amount in this entry (wei)
+        uint64 timestamp;   // deposit time
+    }
+
+    mapping(address => DepositEntry[]) private _deposits;
+    mapping(address => uint256) public nextWithdrawalIndex; // first entry with remaining balance
+    mapping(address => uint256) public totalDeposited;
+    mapping(address => uint256) public totalWithdrawn;
+    uint256 public totalDeposits; // total amount ever deposited minus withdrawn
+
+    uint256 public depositLockSeconds; // global lock duration applied to each deposit entry
 
     // --- Borrower loan state ---
     struct Loan {
-        uint256 principal;   // total principal issued
-        uint256 outstanding; // amount still due
-        uint256 startTime;   // loan start
-        uint256 dueTime;     // deadline to repay
-        bool active;         // true while outstanding > 0
+        uint256 principal;
+        uint256 outstanding;
+        uint256 startTime;
+        uint256 dueTime;
+        bool active;
     }
     mapping(address => Loan) public loans;
 
@@ -49,86 +49,107 @@ contract LendingPool is Ownable {
     mapping(address => bool) public banned;
 
     // --- Events ---
-    event Deposited(address indexed lender, uint256 amount);
+    event Deposited(address indexed lender, uint256 amount, uint256 timestamp);
     event Withdrawn(address indexed lender, uint256 amount);
     event LoanOpened(address indexed borrower, uint256 principal, uint256 startTime, uint256 dueTime);
     event LoanRepaid(address indexed borrower, uint256 amount, uint256 remaining);
     event BorrowerBanned(address indexed borrower);
     event BorrowerUnbanned(address indexed borrower);
+    event TrustMintSbtUpdated(address indexed sbt);
+    event MinScoreUpdated(uint256 minScore);
+    event DepositLockUpdated(uint256 lockSeconds);
 
-    constructor(IERC20 _stablecoin, address initialOwner) Ownable(initialOwner) {
-        STABLECOIN = _stablecoin;
-    }
+    constructor(address initialOwner) Ownable(initialOwner) {}
 
     // --- Configuration ---
     function setTrustMintSbt(address sbt) external onlyOwner {
-        trustMintSbt = sbt; // set 0x0 to disable gating
+        trustMintSbt = sbt;
+        emit TrustMintSbtUpdated(sbt);
     }
 
     function setMinScoreToBorrow(uint256 newMinScore) external onlyOwner {
         minScoreToBorrow = newMinScore;
+        emit MinScoreUpdated(newMinScore);
     }
 
     function setDepositLockSeconds(uint256 seconds_) external onlyOwner {
         depositLockSeconds = seconds_;
+        emit DepositLockUpdated(seconds_);
     }
 
     // --- Lender actions ---
 
     /**
-     * @notice Lender deposits stablecoin to the pool.
-     * @dev Requires ERC20 allowance set to this contract.
+     * @notice Deposit native token (USDC on Arc) into the pool.
+     * @param amount Amount in wei; must equal msg.value.
      */
-    function deposit(uint256 amount) external {
+    function deposit(uint256 amount) external payable nonReentrant {
         require(amount > 0, "amount=0");
-        deposits[msg.sender] += amount;
+        require(msg.value == amount, "msg.value mismatch");
+        require(amount <= type(uint128).max, "amount too large");
+
+        uint128 amount128 = SafeCast.toUint128(amount);
+        uint64 timestamp64 = SafeCast.toUint64(block.timestamp);
+
+        _deposits[msg.sender].push(DepositEntry({amount: amount128, timestamp: timestamp64}));
+        totalDeposited[msg.sender] += amount;
         totalDeposits += amount;
-        STABLECOIN.safeTransferFrom(msg.sender, address(this), amount);
-        // Update per-lender lock timestamp
-        if (depositLockSeconds > 0) {
-            uint256 newLockedUntil = block.timestamp + depositLockSeconds;
-            if (newLockedUntil > lockedUntil[msg.sender]) {
-                lockedUntil[msg.sender] = newLockedUntil;
-            }
-        }
-        emit Deposited(msg.sender, amount);
+
+        emit Deposited(msg.sender, amount, block.timestamp);
     }
 
     /**
-     * @notice Withdraw lender funds that are not currently lent out.
-     * @dev Withdrawals are limited by available liquidity in the contract.
+     * @notice Withdraw unlocked funds that have completed the lock period.
+     * @param amount Amount to withdraw in wei.
      */
-    function withdraw(uint256 amount) external {
+    function withdraw(uint256 amount) external nonReentrant {
         require(amount > 0, "amount=0");
-        // Enforce global lock if configured
-        require(block.timestamp >= lockedUntil[msg.sender], "locked");
-        uint256 netBalance = deposits[msg.sender] - withdrawals[msg.sender];
-        require(netBalance >= amount, "insufficient lender balance");
-        uint256 available = availableLiquidity();
-        require(available >= amount, "insufficient pool liquidity");
+        uint256 remaining = amount;
+        uint256 idx = nextWithdrawalIndex[msg.sender];
+        DepositEntry[] storage entries = _deposits[msg.sender];
 
-        withdrawals[msg.sender] += amount;
-        STABLECOIN.safeTransfer(msg.sender, amount);
+        while (remaining > 0) {
+            require(idx < entries.length, "insufficient balance");
+            DepositEntry storage entry = entries[idx];
+            require(entry.amount > 0, "entry empty");
+            require(block.timestamp >= entry.timestamp + depositLockSeconds, "locked");
+
+            uint256 entryAmount = entry.amount;
+            if (entryAmount > remaining) {
+                entry.amount = SafeCast.toUint128(entryAmount - remaining);
+                remaining = 0;
+            } else {
+                remaining -= entryAmount;
+                entry.amount = 0;
+                idx++;
+            }
+        }
+
+        nextWithdrawalIndex[msg.sender] = idx;
+        totalWithdrawn[msg.sender] += amount;
+        totalDeposits -= amount;
+
+        require(address(this).balance >= amount, "pool liquidity low");
+        (bool sent, ) = msg.sender.call{value: amount}("");
+        require(sent, "transfer failed");
+
         emit Withdrawn(msg.sender, amount);
     }
 
     // --- Borrower actions ---
 
     /**
-     * @notice Open a loan for `borrower` and send principal immediately.
-     * @dev Simple demo policy: callable by owner/governance. Optional SBT+score gating.
-     *      The pool must have sufficient liquid funds to issue the loan.
-     * @param borrower The borrower wallet address
-     * @param principal Principal amount to issue (in token decimals)
-     * @param termSeconds Time until due, in seconds
+     * @notice Issue a loan to `borrower` and send principal immediately. Callable by owner/governance.
+     * @param borrower Borrower wallet
+     * @param principal Principal in wei
+     * @param termSeconds Loan duration in seconds
      */
-    function openLoan(address borrower, uint256 principal, uint256 termSeconds) external onlyOwner {
+    function openLoan(address borrower, uint256 principal, uint256 termSeconds) external onlyOwner nonReentrant {
         require(!banned[borrower], "borrower banned");
         require(principal > 0, "principal=0");
         require(termSeconds > 0, "term=0");
-        require(availableLiquidity() >= principal, "insufficient liquidity");
+        require(address(this).balance >= principal, "insufficient liquidity");
 
-        // Optional credential gating
         if (trustMintSbt != address(0)) {
             ITrustMintSBT sbt = ITrustMintSBT(trustMintSbt);
             require(sbt.hasSbt(borrower), "no SBT");
@@ -146,35 +167,32 @@ contract LendingPool is Ownable {
         loan.dueTime = block.timestamp + termSeconds;
         loan.active = true;
 
-        STABLECOIN.safeTransfer(borrower, principal);
+        (bool sent, ) = payable(borrower).call{value: principal}("");
+        require(sent, "loan transfer failed");
+
         emit LoanOpened(borrower, principal, loan.startTime, loan.dueTime);
     }
 
     /**
-     * @notice Repay part or all of the outstanding loan.
-     * @dev Borrower must approve this contract to pull funds.
+     * @notice Repay part or all of an outstanding loan by sending native token.
+     * @param amount Amount in wei; must equal msg.value.
      */
-    function repay(uint256 amount) external {
+    function repay(uint256 amount) external payable nonReentrant {
         Loan storage loan = loans[msg.sender];
         require(loan.active, "no active loan");
         require(amount > 0, "amount=0");
+        require(msg.value == amount, "msg.value mismatch");
         require(amount <= loan.outstanding, "repay > outstanding");
 
-        STABLECOIN.safeTransferFrom(msg.sender, address(this), amount);
         loan.outstanding -= amount;
-
         if (loan.outstanding == 0) {
             loan.active = false;
-            // Borrower may be banned due to lateness; owner can unban later if policy allows.
         }
 
         emit LoanRepaid(msg.sender, amount, loan.outstanding);
     }
 
-    /**
-     * @notice Check and mark borrower as banned if past due and still outstanding.
-     * @dev Can be called by anyone (UI or automation) to enforce ban policy.
-     */
+    // --- Ban management ---
     function checkDefaultAndBan(address borrower) external {
         Loan storage loan = loans[borrower];
         if (loan.active && block.timestamp > loan.dueTime && loan.outstanding > 0 && !banned[borrower]) {
@@ -183,9 +201,6 @@ contract LendingPool is Ownable {
         }
     }
 
-    /**
-     * @notice Owner can unban a borrower (e.g., after full repayment or appeal).
-     */
     function unban(address borrower) external onlyOwner {
         require(banned[borrower], "not banned");
         banned[borrower] = false;
@@ -203,15 +218,35 @@ contract LendingPool is Ownable {
     }
 
     function lenderBalance(address lender) external view returns (uint256) {
-        return deposits[lender] - withdrawals[lender];
+        return totalDeposited[lender] - totalWithdrawn[lender];
     }
 
-    function getLockedUntil(address lender) external view returns (uint256) {
-        return lockedUntil[lender];
+    function previewWithdraw(address lender) external view returns (uint256 unlockable) {
+        DepositEntry[] storage entries = _deposits[lender];
+        uint256 idx = nextWithdrawalIndex[lender];
+        uint256 len = entries.length;
+        uint256 current = block.timestamp;
+        uint256 lockPeriod = depositLockSeconds;
+
+        while (idx < len) {
+            DepositEntry storage entry = entries[idx];
+            if (entry.amount == 0) {
+                idx++;
+                continue;
+            }
+            if (current < entry.timestamp + lockPeriod) {
+                break;
+            }
+            unlockable += entry.amount;
+            idx++;
+        }
+    }
+
+    function getDeposits(address lender) external view returns (DepositEntry[] memory) {
+        return _deposits[lender];
     }
 
     function availableLiquidity() public view returns (uint256) {
-        // Liquidity equals current token balance; outstanding loans reduce balance because funds left the contract
-        return STABLECOIN.balanceOf(address(this));
+        return address(this).balance;
     }
 }
