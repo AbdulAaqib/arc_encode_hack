@@ -17,6 +17,30 @@ interface ITrustMintSBT {
  *         Funds are transferred into the pool contract immediately; borrowers repay in native token as well.
  */
 contract LendingPool is Ownable, ReentrancyGuard {
+    // --- Errors ---
+    error DepositAmountZero();
+    error DepositValueMismatch(uint256 expected, uint256 actual);
+    error DepositAmountTooLarge();
+    error WithdrawAmountZero();
+    error WithdrawExceedsDeposits();
+    error DepositEntryDepleted();
+    error DepositLocked(uint256 unlockTime);
+    error PoolLiquidityInsufficient(uint256 requested, uint256 available);
+    error TransferToLenderFailed();
+    error BorrowerBannedError(address borrower);
+    error LoanPrincipalZero();
+    error LoanTermZero();
+    error BorrowerMissingSbt(address borrower);
+    error BorrowerScoreInvalid(address borrower);
+    error BorrowerScoreTooLow(address borrower, uint256 score, uint256 minScore);
+    error BorrowerHasUnpaidLoan(address borrower, uint256 outstanding);
+    error TransferToBorrowerFailed();
+    error NoActiveLoan();
+    error RepayAmountZero();
+    error RepayValueMismatch(uint256 expected, uint256 actual);
+    error RepayAmountTooLarge(uint256 amount, uint256 outstanding);
+    error RepayExactAmountRequired(uint256 required);
+    error BorrowerNotBanned(address borrower);
     // --- Optional credential gating ---
     address public trustMintSbt; // set to 0x0 to disable SBT/score checks
     uint256 public minScoreToBorrow = 600;
@@ -84,9 +108,9 @@ contract LendingPool is Ownable, ReentrancyGuard {
      * @param amount Amount in wei; must equal msg.value.
      */
     function deposit(uint256 amount) external payable nonReentrant {
-        require(amount > 0, "amount=0");
-        require(msg.value == amount, "msg.value mismatch");
-        require(amount <= type(uint128).max, "amount too large");
+        if (amount == 0) revert DepositAmountZero();
+        if (msg.value != amount) revert DepositValueMismatch(amount, msg.value);
+        if (amount > type(uint128).max) revert DepositAmountTooLarge();
 
         uint128 amount128 = SafeCast.toUint128(amount);
         uint64 timestamp64 = SafeCast.toUint64(block.timestamp);
@@ -103,16 +127,18 @@ contract LendingPool is Ownable, ReentrancyGuard {
      * @param amount Amount to withdraw in wei.
      */
     function withdraw(uint256 amount) external nonReentrant {
-        require(amount > 0, "amount=0");
+        if (amount == 0) revert WithdrawAmountZero();
         uint256 remaining = amount;
         uint256 idx = nextWithdrawalIndex[msg.sender];
         DepositEntry[] storage entries = _deposits[msg.sender];
 
         while (remaining > 0) {
-            require(idx < entries.length, "insufficient balance");
+            if (idx >= entries.length) revert WithdrawExceedsDeposits();
             DepositEntry storage entry = entries[idx];
-            require(entry.amount > 0, "entry empty");
-            require(block.timestamp >= entry.timestamp + depositLockSeconds, "locked");
+            if (entry.amount == 0) revert DepositEntryDepleted();
+            if (block.timestamp < entry.timestamp + depositLockSeconds) {
+                revert DepositLocked(entry.timestamp + depositLockSeconds);
+            }
 
             uint256 entryAmount = entry.amount;
             if (entryAmount > remaining) {
@@ -129,9 +155,10 @@ contract LendingPool is Ownable, ReentrancyGuard {
         totalWithdrawn[msg.sender] += amount;
         totalDeposits -= amount;
 
-        require(address(this).balance >= amount, "pool liquidity low");
+        uint256 available = address(this).balance;
+        if (available < amount) revert PoolLiquidityInsufficient(amount, available);
         (bool sent, ) = msg.sender.call{value: amount}("");
-        require(sent, "transfer failed");
+        if (!sent) revert TransferToLenderFailed();
 
         emit Withdrawn(msg.sender, amount);
     }
@@ -145,21 +172,22 @@ contract LendingPool is Ownable, ReentrancyGuard {
      * @param termSeconds Loan duration in seconds
      */
     function openLoan(address borrower, uint256 principal, uint256 termSeconds) external onlyOwner nonReentrant {
-        require(!banned[borrower], "borrower banned");
-        require(principal > 0, "principal=0");
-        require(termSeconds > 0, "term=0");
-        require(address(this).balance >= principal, "insufficient liquidity");
+        if (banned[borrower]) revert BorrowerBannedError(borrower);
+        if (principal == 0) revert LoanPrincipalZero();
+        if (termSeconds == 0) revert LoanTermZero();
+        uint256 available = address(this).balance;
+        if (available < principal) revert PoolLiquidityInsufficient(principal, available);
 
         if (trustMintSbt != address(0)) {
             ITrustMintSBT sbt = ITrustMintSBT(trustMintSbt);
-            require(sbt.hasSbt(borrower), "borrower lacks TrustMint SBT");
+            if (!sbt.hasSbt(borrower)) revert BorrowerMissingSbt(borrower);
             (uint256 score,, bool valid) = sbt.getScore(borrower);
-            require(valid, "invalid score");
-            require(score >= minScoreToBorrow, "score too low");
+            if (!valid) revert BorrowerScoreInvalid(borrower);
+            if (score < minScoreToBorrow) revert BorrowerScoreTooLow(borrower, score, minScoreToBorrow);
         }
 
         Loan storage loan = loans[borrower];
-        require(!loan.active || loan.outstanding == 0, "borrower has unpaid loan");
+        if (loan.active && loan.outstanding != 0) revert BorrowerHasUnpaidLoan(borrower, loan.outstanding);
 
         loan.principal = principal;
         loan.outstanding = principal;
@@ -168,7 +196,7 @@ contract LendingPool is Ownable, ReentrancyGuard {
         loan.active = true;
 
         (bool sent, ) = payable(borrower).call{value: principal}("");
-        require(sent, "loan transfer failed");
+        if (!sent) revert TransferToBorrowerFailed();
 
         emit LoanOpened(borrower, principal, loan.startTime, loan.dueTime);
     }
@@ -179,17 +207,16 @@ contract LendingPool is Ownable, ReentrancyGuard {
      */
     function repay(uint256 amount) external payable nonReentrant {
         Loan storage loan = loans[msg.sender];
-        require(loan.active, "no active loan");
-        require(amount > 0, "amount=0");
-        require(msg.value == amount, "msg.value mismatch");
-        require(amount <= loan.outstanding, "repay > outstanding");
+        if (!loan.active) revert NoActiveLoan();
+        if (amount == 0) revert RepayAmountZero();
+        if (msg.value != amount) revert RepayValueMismatch(amount, msg.value);
+        if (amount > loan.outstanding) revert RepayAmountTooLarge(amount, loan.outstanding);
+        if (amount != loan.outstanding) revert RepayExactAmountRequired(loan.outstanding);
 
-        loan.outstanding -= amount;
-        if (loan.outstanding == 0) {
-            loan.active = false;
-        }
+        loan.outstanding = 0;
+        loan.active = false;
 
-        emit LoanRepaid(msg.sender, amount, loan.outstanding);
+        emit LoanRepaid(msg.sender, amount, 0);
     }
 
     // --- Ban management ---
@@ -202,7 +229,7 @@ contract LendingPool is Ownable, ReentrancyGuard {
     }
 
     function unban(address borrower) external onlyOwner {
-        require(banned[borrower], "not banned");
+        if (!banned[borrower]) revert BorrowerNotBanned(borrower);
         banned[borrower] = false;
         emit BorrowerUnbanned(borrower);
     }
@@ -221,7 +248,7 @@ contract LendingPool is Ownable, ReentrancyGuard {
         return totalDeposited[lender] - totalWithdrawn[lender];
     }
 
-    function previewWithdraw(address lender) external view returns (uint256 unlockable) {
+    function previewWithdraw(address lender) public view returns (uint256 unlockable) {
         DepositEntry[] storage entries = _deposits[lender];
         uint256 idx = nextWithdrawalIndex[lender];
         uint256 len = entries.length;
@@ -244,6 +271,63 @@ contract LendingPool is Ownable, ReentrancyGuard {
 
     function getDeposits(address lender) external view returns (DepositEntry[] memory) {
         return _deposits[lender];
+    }
+
+    function loanStatus(address borrower)
+        external
+        view
+        returns (
+            bool active,
+            uint256 principal,
+            uint256 outstanding,
+            uint256 startTime,
+            uint256 dueTime,
+            bool bannedStatus
+        )
+    {
+        Loan storage loan = loans[borrower];
+        return (loan.active, loan.principal, loan.outstanding, loan.startTime, loan.dueTime, banned[borrower]);
+    }
+
+    function lenderStatus(address lender)
+        external
+        view
+        returns (
+            uint256 totalDeposited_,
+            uint256 totalWithdrawn_,
+            uint256 balance,
+            uint256 unlockable
+        )
+    {
+        totalDeposited_ = totalDeposited[lender];
+        totalWithdrawn_ = totalWithdrawn[lender];
+        balance = totalDeposited_ - totalWithdrawn_;
+        unlockable = previewWithdraw(lender);
+    }
+
+    function canOpenLoan(address borrower, uint256 principal)
+        external
+        view
+        returns (bool ok, string memory reason)
+    {
+        if (principal == 0) return (false, "Principal must be greater than zero");
+        if (banned[borrower]) return (false, "Borrower is banned");
+
+        uint256 available = address(this).balance;
+        if (available < principal) return (false, "Insufficient pool liquidity");
+
+        if (trustMintSbt != address(0)) {
+            ITrustMintSBT sbt = ITrustMintSBT(trustMintSbt);
+            if (!sbt.hasSbt(borrower)) return (false, "Borrower lacks required SBT");
+            (uint256 score,, bool valid) = sbt.getScore(borrower);
+            if (!valid) return (false, "Borrower score invalid");
+            if (score < minScoreToBorrow) return (false, "Borrower score below minimum");
+        }
+
+        Loan storage loan = loans[borrower];
+        if (loan.active && loan.outstanding != 0) return (false, "Borrower has an active loan");
+
+        return (true, "OK");
     }
 
     function availableLiquidity() public view returns (uint256) {
