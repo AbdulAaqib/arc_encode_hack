@@ -176,9 +176,33 @@ async def run_verification_flow(user_data: Dict[str, Any]) -> Dict[str, Any]:
 # Self-test when running the file directly
 # -----------------------------------------------------------
 if __name__ == "__main__":
+    # Mock file class to simulate uploaded files
+    class MockUploadedFile:
+        """Mock file object that simulates Streamlit UploadedFile."""
+        def __init__(self, mime_type: str, size: int, name: str = "test_file"):
+            self.type = mime_type
+            self.size = size
+            self.name = name
+            self._content = b"x" * size  # Create dummy content of specified size
+        
+        def read(self):
+            return self._content
+        
+        def seek(self, position: int, whence: int = 0):
+            pass
+        
+        def tell(self):
+            return self.size
+    
     async def test_verification_flow():
         """Test the verification flow with sample data."""
         print("Testing Verification Flow...\n")
+        
+        # Create mock uploaded files (PDF and PNG, both > 20 KB)
+        mock_files = [
+            MockUploadedFile("application/pdf", 25 * 1024, "test_document.pdf"),  # 25 KB PDF
+            MockUploadedFile("image/png", 30 * 1024, "test_image.png")  # 30 KB PNG
+        ]
         
         test_data = {
             "wallet_address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
@@ -186,7 +210,7 @@ if __name__ == "__main__":
             "email": "user@gmail.com",
             "phone": "+12345678901",
             "social_link": "https://github.com/johndoe",
-            "uploaded_files": None
+            "uploaded_files": mock_files
         }
         
         results = await run_verification_flow(test_data)
