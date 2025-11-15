@@ -824,16 +824,38 @@ def _render_verification_section() -> None:
     # Session state key for storing verification results
     verification_results_key = "verification_results"
     
+    # Get chain_id for wallet connection (same as used in role assignment)
+    rpc_url = os.getenv(ARC_RPC_ENV)
+    w3 = get_web3_client(rpc_url)
+    chain_id = None
+    try:
+        chain_id = w3.eth.chain_id if w3 else None
+    except Exception:
+        chain_id = None
+    
+    # Connect to MetaMask wallet
+    wallet_info = connect_wallet(
+        key="verification_wallet",
+        require_chain_id=chain_id,
+        autoconnect=True,
+    )
+    
+    wallet_address = wallet_info.get("address") if isinstance(wallet_info, dict) else None
+    
+    # Show wallet connection status
+    if wallet_address:
+        st.info(f"✅ Connected wallet: `{wallet_address}`")
+    else:
+        st.warning("⚠️ Please connect your MetaMask wallet to proceed with verification.")
+    
     # Form for user input
     with st.form("verification_form", clear_on_submit=False):
         st.markdown("### User Information")
         
-        wallet_address = st.text_input(
-            "Wallet Address *",
-            value="",
-            help="Required: Ethereum wallet address to verify",
-            key="verification_wallet_address"
-        ).strip()
+        if wallet_address:
+            st.markdown(f"**Wallet Address:** `{wallet_address}`")
+        else:
+            st.error("❌ No wallet connected. Connect MetaMask to continue.")
         
         col1, col2 = st.columns(2)
         
@@ -875,17 +897,12 @@ def _render_verification_section() -> None:
             key="verification_uploaded_files"
         )
         
-        submitted = st.form_submit_button("Run Verification", type="primary")
+        submitted = st.form_submit_button("Run Verification", type="primary", disabled=not wallet_address)
     
     # Handle form submission
     if submitted:
         if not wallet_address:
-            st.error("❌ Wallet address is required. Please enter a wallet address.")
-            return
-        
-        # Validate wallet address format (basic check)
-        if not wallet_address.startswith("0x") or len(wallet_address) != 42:
-            st.error("❌ Invalid wallet address format. Please enter a valid Ethereum address (0x...).")
+            st.error("❌ Wallet address is required. Please connect your MetaMask wallet first.")
             return
         
         # Prepare user data
