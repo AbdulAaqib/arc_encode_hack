@@ -84,6 +84,23 @@ def _wallet_flow_blocked() -> bool:
     )
 
 
+def _cleanup_pending_tool_calls() -> None:
+    messages = st.session_state.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    
+    while messages:
+        last = messages[-1]
+        if not isinstance(last, dict):
+            break
+        if last.get("role") != "assistant":
+            break
+        tool_calls = last.get("tool_calls")
+        if not tool_calls:
+            break
+        messages.pop()
+
+
 def _build_chatbot_state_tools(
     expected_chain_id: Optional[int],
     roles_session_key: str,
@@ -97,8 +114,7 @@ def _build_chatbot_state_tools(
         handlers[name] = handler
 
     def _current_roles() -> Dict[str, str]:
-        stored = st.session_state.get(roles_session_key)
-        return stored if isinstance(stored, dict) else {}
+        return role_addresses
 
     def _preferred_address() -> Optional[str]:
         for role in ("Borrower", "Owner", "Lender"):
@@ -228,7 +244,7 @@ def _build_chatbot_state_tools(
         })
 
     def get_roles_tool() -> str:
-        return tool_success({"role_addresses": _current_roles()})
+        return tool_success({"role_addresses": dict(_current_roles())})
 
     def assign_role_tool(role: str, wallet_address: Optional[str] = None, use_connected_wallet: bool = True) -> str:
         if not role:
@@ -250,19 +266,19 @@ def _build_chatbot_state_tools(
         except ValueError:
             return tool_error("Wallet address is invalid.")
 
-        current = _current_roles()
-        current[normalized_role] = checksum
-        st.session_state[roles_session_key] = current
+        role_addresses[normalized_role] = checksum
+        st.session_state[roles_session_key] = role_addresses
+        st.session_state["chatbot_roles_dirty"] = True
         return tool_success({"role": normalized_role, "address": checksum})
 
     def clear_role_tool(role: str) -> str:
         if not role:
             return tool_error("Role name is required.")
         normalized_role = role.strip().capitalize()
-        current = _current_roles()
-        if normalized_role in current:
-            current.pop(normalized_role)
-            st.session_state[roles_session_key] = current
+        if normalized_role in role_addresses:
+            role_addresses.pop(normalized_role)
+            st.session_state[roles_session_key] = role_addresses
+            st.session_state["chatbot_roles_dirty"] = True
         return tool_success({"role": normalized_role, "cleared": True})
 
     register(
@@ -796,6 +812,9 @@ def render_chatbot_page() -> None:
                         private_key=private_key,
                         default_gas_limit=default_gas_limit,
                         gas_price_gwei=gas_price_gwei,
+                        role_addresses=role_addresses,
+                        role_private_keys=role_private_keys,
+                        borrower_guard=sbt_guard,
                     )
                 except ValueError as e:
                     pool_error = f"Invalid LendingPool contract address: {e}"
@@ -905,22 +924,11 @@ cd blockchain_code && forge build""", language="bash")
         
         return
 
-    resume_mode = resume_pending and not prompt
+    resume_mode = bool(resume_pending and not prompt)
 
-    if not prompt and not resume_mode:
+    _cleanup_pending_tool_calls()
+    if _wallet_flow_blocked():
         return
-
-    resume_mode = resume_pending and not prompt
-
-    if not prompt and not resume_mode:
-        return
-
-    resume_mode = resume_pending and not prompt
-
-    if not prompt and not resume_mode:
-        return
-
-    resume_mode = resume_pending and not prompt
 
     if not prompt and not resume_mode:
         return
@@ -949,5 +957,10 @@ cd blockchain_code && forge build""", language="bash")
         st.session_state.pop("chatbot_needs_tx_rerun", None)
         import logging
         logging.getLogger("arc.mcp.tools").info("Auto-rerunning to display pending transaction in wallet widget...")
+        st.rerun()
+
+    if st.session_state.pop("chatbot_roles_dirty", False):
+        import logging
+        logging.getLogger("arc.mcp.tools").info("Auto-rerunning to rebuild toolkits with updated role assignments...")
         st.rerun()
 

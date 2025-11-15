@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+import os
 import pandas as pd
 import streamlit as st
 from web3 import Web3
@@ -31,7 +32,8 @@ def render_intro_page() -> None:
 
     st.title("🐶 PawChain Capital Credit Dashboard")
 
-    rpc_url = st.session_state.get("rpc_url", "https://rpc.testnet.arc.network")
+    env_rpc = os.getenv("ARC_TESTNET_RPC_URL", "https://rpc.testnet.arc.network")
+    rpc_url = st.session_state.get("rpc_url") or env_rpc
     wallet_address = st.session_state.get("wallet_address")
     contract_address = st.session_state.get("contract_address")
     abi_text = st.session_state.get("contract_abi")
