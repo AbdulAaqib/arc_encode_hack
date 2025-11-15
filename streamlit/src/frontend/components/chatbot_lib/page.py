@@ -731,6 +731,7 @@ def render_chatbot_page() -> None:
     sbt_error: str | None = None
     
     sbt_guard: Optional[Callable[[str], Optional[str]]] = None
+
     sbt_guard: Optional[Callable[[str], Optional[str]]] = None
     if sbt_address and sbt_abi_path:
         try:
@@ -821,6 +822,10 @@ def render_chatbot_page() -> None:
     bridge_tools_schema, bridge_function_map = build_bridge_toolkit()
     state_tools_schema, state_function_map = _build_chatbot_state_tools(chain_id, roles_key, role_addresses)
 
+
+    bridge_tools_schema, bridge_function_map = build_bridge_toolkit()
+    state_tools_schema, state_function_map = _build_chatbot_state_tools(chain_id, roles_key, role_addresses)
+
     tools_schema = sbt_tools_schema + pool_tools_schema + bridge_tools_schema + state_tools_schema
     function_map: Dict[str, Callable[..., str]] = {}
     function_map.update(sbt_function_map)
@@ -898,6 +903,11 @@ ls -la blockchain_code/out/LendingPool.sol/LendingPool.json
 # If missing, compile contracts
 cd blockchain_code && forge build""", language="bash")
         
+        return
+
+    resume_mode = resume_pending and not prompt
+
+    if not prompt and not resume_mode:
         return
 
     resume_mode = resume_pending and not prompt
