@@ -1,15 +1,15 @@
-# TrustMint — Identity‑based Lending on Arc (SBT + Pool MVP) hello
+# SnifferBank — Identity‑based Lending on Arc (SBT + Pool MVP)
 
-A credit‑infrastructure MVP on Arc that lets underserved creators and SMBs access stable‑coin loans using a verifiable on‑chain credential and a unified credit score from on‑chain + off‑chain data.
+A credit‑infrastructure platform on Arc that enables underserved creators and SMBs to access stable‑coin loans using verifiable on‑chain credentials and a unified credit score derived from on‑chain and off‑chain data sources.
 
 ---
 
 ## What it does
 
 - Builds an identity‑based lending flow on Arc using a non‑transferable Soul‑Bound Token (SBT) as a verifiable credential.
-- Computes a TrustMint Score by merging on‑chain reputation (wallet history, activity) with off‑chain cash‑flow signals (uploaded docs).
-- Unlocks USDC working‑capital loans for eligible borrowers.
-- MVP ships SBT credential + credit line manager. Lender deposits/withdrawals are planned next (see Roadmap).
+- Computes a SnifferBank Credit Score by merging on‑chain reputation (wallet history, transaction activity/volume) with off‑chain cash‑flow signals (uploaded bank statements and financial documents).
+- Unlocks USDC working‑capital loans for eligible borrowers through an integrated lending pool.
+- Ships with SBT credential system, credit line manager, and lending pool with deposit/withdrawal functionality.
 
 ---
 
@@ -19,71 +19,86 @@ A credit‑infrastructure MVP on Arc that lets underserved creators and SMBs acc
 - User connects a wallet in the Streamlit app and (optionally) signs a message for ownership.
 
 2) Off‑Chain + On‑Chain Data Collection
-- On‑chain: fetch wallet metrics (wallet age, transaction activity/volume, behavior).
-- Off‑chain: user uploads bank statements or provides simplified income/expenses; system extracts net income, consistency, spend patterns.
-- A unified TrustMint Score is computed from both sources.
+- On‑chain: fetch wallet metrics (wallet age, transaction activity/volume, behavior patterns).
+- Off‑chain: user uploads bank statements or provides simplified income/expenses; system extracts net income, consistency, and spend patterns.
+- A unified SnifferBank Credit Score is computed from both sources.
 
 3) Credential Issuance (SBT)
 - If the user meets criteria, the smart contract mints a non‑transferable SBT to their wallet representing their credit identity and current score.
 
-4) Lender Pool & Deposits (Planned in next iteration)
-- Lenders deposit USDC into a Lending Pool contract and receive a representation of their share (e.g., ERC‑4626‑style share token). Liquidity is used for borrower draws; lenders can later withdraw their share plus any returns.
-- For the MVP, you can seed liquidity directly into the CreditLineManager contract (send testnet USDC) to allow draws.
+4) Lender Pool & Deposits
+- Lenders deposit USDC into the LendingPool contract and receive deposit entries tracked by the contract. Liquidity is used for borrower draws; lenders can withdraw their deposits (subject to lock periods and available balance).
+- The LendingPool contract manages deposits, loan issuance, repayments, and lender withdrawals with built-in SBT gating for borrowers.
 
 5) Borrower Loan Draw
-- Borrower sees eligibility (e.g., "You’re eligible for X USDC").
-- Press "Draw"; contract verifies eligibility (SBT/score gating planned on‑chain; currently enforced off‑chain by issuer/governance who creates lines for eligible users) and available liquidity. On success, USDC is transferred to borrower.
+- Borrower sees eligibility based on their SBT credential and credit score (e.g., "You're eligible for X USDC").
+- Borrower initiates loan draw; the LendingPool contract verifies eligibility (SBT gating enforced on‑chain) and available liquidity. On success, USDC is transferred to the borrower's wallet.
 
 6) Borrower Repayment
 - Borrower repays (principal, or principal+return if enabled) and contract updates their outstanding balance/status.
 
-7) Lender Withdrawal & Returns (Planned)
-- As borrowers repay, the pool is replenished. Lenders can redeem their share for underlying USDC and any accrued return.
+7) Lender Withdrawal & Returns
+- As borrowers repay, the pool liquidity is replenished. Lenders can withdraw their deposits (subject to lock periods) for underlying USDC. Returns accrue as borrowers repay loans with interest.
 
 8) Arc‑specific advantages
 - USDC‑native fees and predictable costs, making working‑capital lending practical. Sub‑second finality and EVM‑compatibility.
 
 ---
 
-## Why this matters
+## Why SnifferBank Matters
 
-- Identity‑based lending: The SBT acts as a verifiable on‑chain credential for credit identity.
-- Reputation‑driven credit: Combines on‑chain behavior with off‑chain cash‑flow, not pure crypto collateral.
-- Stable‑coin native: Loans are USDC‑denominated on Arc.
-- Lender/borrower market: Funds sourced from lenders; borrowers draw and repay; creates a full credit loop (pool planned in next iteration).
+- **Identity‑based lending**: The SBT acts as a verifiable on‑chain credential for credit identity, enabling trustless access to credit.
+- **Reputation‑driven credit**: Combines on‑chain wallet behavior with off‑chain cash‑flow analysis, moving beyond pure crypto collateral requirements.
+- **Stable‑coin native**: All loans are USDC‑denominated on Arc, providing stable value and predictable terms.
+- **Full credit market**: Complete lender/borrower ecosystem with deposit management, loan issuance, repayments, and returns distribution.
+- **Accessibility**: Enables underserved creators and SMBs to access working capital loans without traditional banking barriers.
 
 ---
 
 ## Key Architecture & Contracts
 
-- TrustMintSBT.sol (deployed in MVP)
+- `TrustMintSBT.sol` (deployed)
   - Non‑transferable ERC‑721 (ERC‑5192 semantics); one token per wallet.
   - Functions: `issueScore(borrower, value)`, `revokeScore(borrower)`, `getScore(borrower) -> (value, timestamp, valid)`, `hasSbt(wallet)`, `tokenIdOf(wallet)`.
   - Metadata via `tokenURI`; transfer/burn disabled; owner is the issuer.
+  - Acts as the core credential system for SnifferBank's identity-based lending.
 
-- CreditLineManager.sol (deployed in MVP)
+- `CreditLineManager.sol` (deployed)
   - Owner‑managed USDC credit lines with `limit`, `drawn`, `interestRate` (bps), and `availableCredit` view.
   - `draw(borrower, amount)` transfers USDC held by the contract; `repay(borrower, amount)` returns USDC to the contract.
-  - Note: For MVP, seed this contract with testnet USDC so draws succeed. Lender deposit/withdraw flows are planned in the pool contract.
+  - Provides alternative credit line management separate from the lending pool.
 
-- CreditScoreRegistry.sol (optional alternative)
+- `CreditScoreRegistry.sol` (optional alternative)
   - Minimal issuer‑only registry maintaining an updatable score mapping. Kept for compatibility and comparison with the SBT approach.
 
-- Lending Pool (planned)
-  - ERC‑4626‑style pool with deposits/withdrawals, LP tokens, and on‑chain verification of borrower credential and score.
+- `LendingPool.sol` (deployed)
+  - Full-featured lending pool with lender deposits, borrower loans, repayments, and withdrawals.
+  - On‑chain verification of borrower SBT credentials and scores.
+  - Lender deposit tracking with lock periods and withdrawal controls.
+  - Loan state management: Active, Repaid, Defaulted.
+  - Actions include: DEPOSIT, WITHDRAW, OPEN_LOAN, REPAY, CHECK_DEFAULT, UNBAN.
 
 ---
 
 ## Repository Layout
 
 - `blockchain_code/`
-  - `src/TrustMintSBT.sol` — SBT credential with score binding.
+  - `src/TrustMintSBT.sol` — SBT credential with score binding for identity verification.
   - `src/CreditLineManager.sol` — Credit lines: create, draw, repay, close, and `availableCredit`.
-  - `src/CreditScoreRegistry.sol` — Optional minimal registry.
+  - `src/CreditScoreRegistry.sol` — Optional minimal registry for score tracking.
+  - `src/LendingPool.sol` — Full lending pool with deposits, loans, repayments, and withdrawals.
   - `out/` — Foundry build artifacts (ABIs under the `abi` field of each JSON).
+  - `lib/` — OpenZeppelin contracts and dependencies.
 - `streamlit/`
   - `src/frontend/app.py` — Streamlit entrypoint (auto‑loads `.env` at repo root).
-  - `src/frontend/components/` — Chatbot, MCP Tools (SBT‑focused), wallet connect, and helpers.
+  - `src/frontend/components/` — Chatbot, MCP Tools, wallet connect, CCTP bridge, verification, and UI helpers.
+    - `chatbot_lib/` — Chatbot infrastructure with Azure OpenAI integration.
+    - `mcp_lib/` — MCP (Model Context Protocol) tools and utilities.
+    - `toolkit_lib/` — Bridge tools, pool tools, SBT tools, and transaction helpers.
+    - `verification/` — Eligibility checking, on-chain/off-chain verification, and score calculation.
+- `blockchain_runner/` — Python utilities for executing blockchain commands and managing limits.
+- `compile_contracts.py` — Contract compilation helper script.
+- `run_blockchain_terminal_commands.py` — Terminal command executor for blockchain operations.
 
 ---
 
@@ -116,18 +131,26 @@ AZURE_OPENAI_CHAT_DEPLOYMENT=your_deployment_name  # e.g., gpt-4o-mini / gpt-4o
 ARC_TESTNET_RPC_URL=https://arc-testnet.example.rpc  # replace with actual Arc testnet RPC
 PRIVATE_KEY=0xabc123...  # test-only key with minimal funds
 
-# SBT contract (used by the MCP Tools UI)
+# SBT contract (used by the MCP Tools UI and SnifferBank platform)
 SBT_ADDRESS=0xYourDeployedSbt
 TRUSTMINT_SBT_ABI_PATH=blockchain_code/out/TrustMintSBT.sol/TrustMintSBT.json
+
+# Lending Pool contract
+LENDING_POOL_ADDRESS=0xYourLendingPool
+LENDING_POOL_ABI_PATH=blockchain_code/out/LendingPool.sol/LendingPool.json
 
 # Optional gas tuning
 ARC_USDC_DECIMALS=6
 ARC_GAS_LIMIT=200000
 ARC_GAS_PRICE_GWEI=1
 
-# Optional advanced (CLI only for now)
-# CREDIT_LINE_MANAGER_ADDRESS=0xYourCreditLineManager
-# CREDIT_LINE_MANAGER_ABI_PATH=blockchain_code/out/CreditLineManager.sol/CreditLineManager.json
+# Optional advanced
+CREDIT_LINE_MANAGER_ADDRESS=0xYourCreditLineManager
+CREDIT_LINE_MANAGER_ABI_PATH=blockchain_code/out/CreditLineManager.sol/CreditLineManager.json
+
+# Optional: Polygon/CCTP bridge (for cross-chain transfers)
+POLYGON_RPC=https://polygon-rpc.example
+POLYGON_PRIVATE_KEY=0xabc123...  # for automatic Polygon minting
 ```
 
 3) Build and (optionally) deploy contracts with Foundry
@@ -142,7 +165,14 @@ forge test -vv
 forge create src/TrustMintSBT.sol:TrustMintSBT \
   --rpc-url "$ARC_TESTNET_RPC_URL" \
   --private-key "$PRIVATE_KEY" \
-  --constructor-args "TrustMint SBT" TMSBT 0xYourOwnerAddress
+  --constructor-args "SnifferBank SBT" SNFSBT 0xYourOwnerAddress
+
+# Deploy LendingPool (constructor: IERC20 stablecoin, ITrustMintSBT sbt, initialOwner)
+# Use Arc testnet USDC address for the first argument and deployed SBT address for the second
+forge create src/LendingPool.sol:LendingPool \
+  --rpc-url "$ARC_TESTNET_RPC_URL" \
+  --private-key "$PRIVATE_KEY" \
+  --constructor-args 0xArcTestnetUSDC 0xYourDeployedSbt 0xYourOwnerAddress
 
 # Optional: Deploy CreditLineManager (constructor: IERC20 stablecoin, initialOwner)
 # Use Arc testnet USDC address for the first argument, then set CREDIT_LINE_MANAGER_ADDRESS in .env
@@ -152,7 +182,7 @@ forge create src/CreditLineManager.sol:CreditLineManager \
   --constructor-args 0xArcTestnetUSDC 0xYourOwnerAddress
 ```
 
-Copy the deployed addresses into `.env` (`SBT_ADDRESS`, optionally `CREDIT_LINE_MANAGER_ADDRESS`).
+Copy the deployed addresses into `.env` (`SBT_ADDRESS`, `LENDING_POOL_ADDRESS`, and optionally `CREDIT_LINE_MANAGER_ADDRESS`).
 
 4) Interact via CLI (SBT)
 
@@ -177,9 +207,10 @@ streamlit run streamlit/src/frontend/app.py
 ```
 
 Navigate via the sidebar:
-- Intro — project overview and setup reminders
-- Chatbot — Azure OpenAI‑powered assistant with doc uploads for off‑chain parsing
-- MCP Tools — interactive panel for SBT calls: hasSbt, getScore, issueScore, revokeScore
+- Intro — SnifferBank project overview and setup reminders
+- Chatbot — Azure OpenAI‑powered assistant with document uploads for off‑chain financial data parsing
+- MCP Tools — interactive panel for SBT operations (hasSbt, getScore, issueScore, revokeScore) and lending pool actions
+- Wallet Connect — wallet connection and verification interface
 
 ### Owner USDC Tools (Same-Chain & CCTP)
 
@@ -192,27 +223,44 @@ Navigate via the sidebar:
 
 ---
 
-## Demo Flow (MVP)
+## Demo Flow
 
-- Connect a wallet and check eligibility via the UI/CLI.
-- Issue a score for a borrower (issuer‑only) → `issueScore(borrower, value)` stores value/timestamp, sets valid=true, and mints SBT if missing.
-- Revoke a score (issuer‑only) → `revokeScore(borrower)` sets valid=false; SBT remains non‑transferable and bound.
-- Optional (CLI): Create a credit line (owner‑only), seed the CreditLineManager with testnet USDC, then draw/repay.
-  - Create: `createCreditLine(borrower, limit, interestBps)`
-  - Draw: `draw(borrower, amount)` (transfers USDC held by the contract)
-  - Repay: `repay(borrower, amount)` (requires ERC20 allowance)
+1. **Wallet Connection & Eligibility Check**
+   - Connect a wallet via the Streamlit UI
+   - System checks eligibility based on on-chain and off-chain data
+
+2. **SBT Issuance & Scoring**
+   - Issue a credit score for a borrower (issuer‑only) → `issueScore(borrower, value)` stores value/timestamp, sets valid=true, and mints SBT if missing.
+   - Revoke a score (issuer‑only) → `revokeScore(borrower)` sets valid=false; SBT remains non‑transferable and bound.
+
+3. **Lender Operations (LendingPool)**
+   - Lender deposits USDC into the pool via `deposit(amount)`
+   - Track deposit entries and available balance
+
+4. **Borrower Operations (LendingPool)**
+   - Borrower with valid SBT opens a loan: `openLoan(principal, repaymentDeadline)`
+   - Borrower repays: `repay(loanId, amount)`
+   - System checks for defaults: `checkDefaultAndBan(loanId)`
+
+5. **Alternative: CreditLineManager (Optional)**
+   - Create a credit line (owner‑only): `createCreditLine(borrower, limit, interestBps)`
+   - Draw: `draw(borrower, amount)` (transfers USDC held by the contract)
+   - Repay: `repay(borrower, amount)` (requires ERC20 allowance)
 
 ---
 
-## Design: Lender Pool & Returns (Planned)
+## Lending Pool Design
 
-- Deposits: Lenders deposit USDC into a dedicated pool contract and receive a share token (likely ERC‑4626) representing their portion of the liquidity.
-- Draws: Borrowers meeting SBT/score criteria draw from the pool subject to utilization and policy.
-- Repayment: Principal (and optionally interest/fees) replenishes the pool.
-- Withdrawals: Lenders redeem their shares for underlying USDC and any accrued return.
-- Transparency: On‑chain metrics reveal utilization, borrower behavior, and pool health.
+The `LendingPool.sol` contract implements a comprehensive lending system:
 
-For the MVP, pool functions are not yet implemented on‑chain. Seed liquidity directly to `CreditLineManager` to enable draws.
+- **Deposits**: Lenders deposit USDC into the pool and receive deposit entries tracked by the contract. Each deposit has a lock period before withdrawal is allowed.
+- **Loans**: Borrowers with valid SBT credentials can open loans from the pool. Loan amounts are subject to available liquidity and borrower eligibility.
+- **Repayments**: Borrowers repay loans (principal plus interest), which replenishes the pool liquidity.
+- **Withdrawals**: Lenders can withdraw their deposits (after lock period) for underlying USDC. Returns accrue as borrowers repay with interest.
+- **Default Management**: The system tracks loan states and can mark loans as defaulted, banning borrowers who fail to repay by the deadline.
+- **Transparency**: On‑chain metrics reveal utilization, borrower behavior, loan status, and pool health.
+
+The pool enforces SBT gating on-chain, ensuring only eligible borrowers can access loans.
 
 ---
 
@@ -235,11 +283,16 @@ For the MVP, pool functions are not yet implemented on‑chain. Seed liquidity d
 
 ## Roadmap
 
-- Implement Lending Pool: deposits/withdrawals with ERC‑4626 shares; on‑chain checks for SBT + score; liquidity accounting and return distribution.
-- Gas sponsorship for mint/update flows; UX polish.
-- Score model hardening: merge deeper on‑chain analytics + off‑chain bank data, invoices, platform revenue.
-- Full risk management: interest accrual, late fees, delinquency handling.
-- Lender dashboard and third‑party verifier interface using the SBT credential.
+- ✅ Core SBT credential system with score binding
+- ✅ Lending pool with deposits, loans, and repayments
+- ✅ On-chain SBT gating for borrower eligibility
+- 🔄 Enhanced score model: deeper on‑chain analytics + off‑chain bank data, invoices, platform revenue
+- 🔄 Advanced risk management: automated interest accrual, late fees, delinquency handling
+- 🔄 Lender dashboard with analytics and yield metrics
+- 🔄 Third‑party verifier interface using the SBT credential
+- 🔄 Gas sponsorship for SBT mint/update flows
+- 🔄 Multi-chain support expansion beyond Arc
+- 🔄 Integration with additional data providers for richer credit assessment
 
 ---
 
